@@ -1,0 +1,52 @@
+# Dependencies (pinned):
+#   forge-std v1.16.1, solady v0.1.26
+# LayerZero/CCTP are NOT installed as deps — we hand-write faithful ^0.8 interfaces
+# (CCTP's upstream is pinned to solc 0.7.6; LZ devtools is painful to wire into raw Foundry).
+# Real-contract validation lives in the env-gated `fork` profile.
+
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+test = "test"
+script = "script"
+solc = "0.8.26"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 1_000_000
+via_ir = false
+bytecode_hash = "none"
+remappings = [
+    "forge-std/=lib/forge-std/src/",
+    "solady/=lib/solady/src/",
+]
+
+[profile.default.fuzz]
+runs = 256
+
+[profile.default.invariant]
+runs = 256
+depth = 64
+fail_on_revert = false
+
+[profile.ci]
+verbosity = 3
+
+[profile.ci.fuzz]
+runs = 1000
+
+[profile.ci.invariant]
+runs = 512
+depth = 128
+fail_on_revert = false
+
+# Fork tests: selected with FOUNDRY_PROFILE=fork. Test bodies vm.skip() when the
+# relevant *_RPC_URL env var is unset, so this profile is safe to run without secrets.
+[profile.fork.fuzz]
+runs = 64
+
+[fmt]
+line_length = 120
+tab_width = 4
+bracket_spacing = false
+int_types = "long"

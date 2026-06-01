@@ -1,0 +1,12 @@
+# Foundry
+out/
+cache/
+broadcast/
+# Dependencies are tracked as git submodules under lib/
+
+# Env
+.env
+.env.*
+
+# Editor / OS
+.DS_Store
