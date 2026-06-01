@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import {Test} from "forge-std/Test.sol";
+import {ForkBase} from "./ForkBase.sol";
 import {CctpAdapter} from "../../src/adapters/CctpAdapter.sol";
 import {Addresses} from "../../script/config/Addresses.sol";
 
@@ -16,14 +16,9 @@ interface IDecimals {
 ///         offline. To exercise the settle path on a fork, capture a known-good (message,
 ///         attestation) pair from a historical CCTP v2 burn whose destinationCaller/mintRecipient
 ///         is a CctpAdapter you control, then replay it through `settle`.
-contract CctpForkTest is Test {
+contract CctpForkTest is ForkBase {
     function test_fork_cctpContractsAndAdapterWiring() external {
-        string memory rpc = vm.envOr("ETH_RPC_URL", string(""));
-        if (bytes(rpc).length == 0) {
-            vm.skip(true);
-            return;
-        }
-        vm.createSelectFork(rpc);
+        if (!_forkMainnetOrSkip()) return;
 
         assertGt(Addresses.CCTP_TOKEN_MESSENGER_V2.code.length, 0, "TokenMessengerV2 has code");
         assertGt(Addresses.CCTP_MESSAGE_TRANSMITTER_V2.code.length, 0, "MessageTransmitterV2 has code");
