@@ -66,10 +66,12 @@ abstract contract Fixtures is Test {
         srcCctp.setDomain(SRC_CHAIN, SRC_DOMAIN);
         srcCctp.setDomain(DST_CHAIN, DST_DOMAIN);
         srcCctp.setRemoteAdapter(DST_CHAIN, address(dstCctp).toBytes32());
+        srcCctp.setRemoteUsdc(DST_CHAIN, address(usdc));
 
         dstCctp.setDomain(SRC_CHAIN, SRC_DOMAIN);
         dstCctp.setDomain(DST_CHAIN, DST_DOMAIN);
         dstCctp.setRemoteAdapter(SRC_CHAIN, address(srcCctp).toBytes32());
+        dstCctp.setRemoteUsdc(SRC_CHAIN, address(usdc));
         vm.stopPrank();
     }
 

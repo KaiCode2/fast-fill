@@ -59,6 +59,7 @@ contract CctpForkE2ETest is ForkBase {
         src.setDomain(ETH_CHAIN, Addresses.DOMAIN_ETHEREUM);
         src.setDomain(BASE_CHAIN, Addresses.DOMAIN_BASE);
         src.setRemoteAdapter(BASE_CHAIN, address(dst).toBytes32());
+        src.setRemoteUsdc(BASE_CHAIN, usdc); // demo loopback: treat Eth USDC as the "remote" output token
     }
 
     function _burn() internal returns (bytes memory message, uint64 nonce, uint64 start) {

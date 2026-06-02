@@ -34,15 +34,22 @@ contract CctpAdapter is FastFillBase {
     mapping(uint32 chainId => uint32 domain) public chainIdToDomain;
     mapping(uint32 domain => uint32 chainId) public domainToChainId;
 
+    /// @dev USDC address on each remote chain. USDC is a different address per chain, so the source
+    ///      must stamp the order's `outputToken` with the DESTINATION's USDC (what is actually
+    ///      minted/delivered there) — not its own. Must equal the destination adapter's `usdc`.
+    mapping(uint32 chainId => address usdc) public remoteUsdc;
+
     error ReceiveMessageFailed();
     error MintRecipientMismatch(bytes32 mintRecipient);
     error UnknownDomain(uint32 chainId);
+    error UnknownRemoteUsdc(uint32 chainId);
     error UntrustedSourceDomain(uint32 sourceDomain);
     error UntrustedSender(bytes32 messageSender);
     error WrongOutputToken(bytes32 outputToken);
     error MaxFeeTooHigh(uint256 maxFee, uint256 inputAmount);
 
     event DomainConfigured(uint32 indexed chainId, uint32 indexed domain);
+    event RemoteUsdcConfigured(uint32 indexed chainId, address indexed usdc);
 
     constructor(
         address owner_,
@@ -86,14 +93,38 @@ contract CctpAdapter is FastFillBase {
         if (maxFee >= inputAmount) revert MaxFeeTooHigh(maxFee, inputAmount);
 
         nonce = _nextNonce();
-        Order memory order = Order({
+        Order memory order =
+            _buildOrder(dstChainId, recipient, inputAmount, maxFee, expectedDeliveryTime, discountRate, nonce);
+        _assertCreatable(order);
+        orderId = order.hash();
+
+        _pullAndBurn(order, destinationDomain, maxFee, minFinalityThreshold);
+
+        emit OrderCreated(
+            orderId, OrderLib.BRIDGE_CCTP, msg.sender, dstChainId, order.outputToken, order.outputAmount, nonce
+        );
+    }
+
+    /// @dev Split out of `initiateCCTP` to keep each stack frame shallow (avoids stack-too-deep).
+    function _buildOrder(
+        uint32 dstChainId,
+        bytes32 recipient,
+        uint256 inputAmount,
+        uint256 maxFee,
+        uint64 expectedDeliveryTime,
+        uint256 discountRate,
+        uint64 nonce
+    ) private view returns (Order memory order) {
+        address outUsdc = remoteUsdc[dstChainId];
+        if (outUsdc == address(0)) revert UnknownRemoteUsdc(dstChainId);
+        order = Order({
             bridgeType: OrderLib.BRIDGE_CCTP,
             srcChainId: uint32(block.chainid),
             dstChainId: dstChainId,
             sender: msg.sender.toBytes32(),
             recipient: recipient,
             inputToken: usdc.toBytes32(),
-            outputToken: usdc.toBytes32(),
+            outputToken: outUsdc.toBytes32(),
             inputAmount: inputAmount,
             outputAmount: inputAmount - maxFee,
             nonce: nonce,
@@ -101,17 +132,17 @@ contract CctpAdapter is FastFillBase {
             expectedDeliveryTime: expectedDeliveryTime,
             discountRate: discountRate
         });
-        _assertCreatable(order);
-        orderId = order.hash();
+    }
 
-        bytes32 dstAdapter = remoteAdapter[dstChainId];
-
-        // Pull USDC from the user and let the TokenMessenger burn it.
-        SafeTransferLib.safeTransferFrom(usdc, msg.sender, address(this), inputAmount);
-        SafeTransferLib.safeApproveWithRetry(usdc, address(tokenMessenger), inputAmount);
-
+    /// @dev Pull USDC from the user, approve the TokenMessenger, and burn-with-hook to the dst adapter.
+    function _pullAndBurn(Order memory order, uint32 destinationDomain, uint256 maxFee, uint32 minFinalityThreshold)
+        private
+    {
+        bytes32 dstAdapter = remoteAdapter[order.dstChainId];
+        SafeTransferLib.safeTransferFrom(usdc, msg.sender, address(this), order.inputAmount);
+        SafeTransferLib.safeApproveWithRetry(usdc, address(tokenMessenger), order.inputAmount);
         tokenMessenger.depositForBurnWithHook(
-            inputAmount,
+            order.inputAmount,
             destinationDomain,
             dstAdapter, // mintRecipient = destination adapter
             usdc,
@@ -119,10 +150,6 @@ contract CctpAdapter is FastFillBase {
             maxFee,
             minFinalityThreshold,
             OrderLib.encode(order)
-        );
-
-        emit OrderCreated(
-            orderId, OrderLib.BRIDGE_CCTP, msg.sender, dstChainId, usdc.toBytes32(), order.outputAmount, nonce
         );
     }
 
@@ -168,5 +195,11 @@ contract CctpAdapter is FastFillBase {
         chainIdToDomain[chainId] = domain;
         domainToChainId[domain] = chainId;
         emit DomainConfigured(chainId, domain);
+    }
+
+    /// @notice Configure the USDC address on a remote chain (used to stamp an order's outputToken).
+    function setRemoteUsdc(uint32 chainId, address token) external onlyOwner {
+        remoteUsdc[chainId] = token;
+        emit RemoteUsdcConfigured(chainId, token);
     }
 }
