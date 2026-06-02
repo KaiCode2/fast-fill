@@ -86,10 +86,12 @@ abstract contract Fixtures is Test {
         srcOft.setEid(SRC_CHAIN, SRC_EID);
         srcOft.setEid(DST_CHAIN, DST_EID);
         srcOft.setRemoteAdapter(DST_CHAIN, address(dstOft).toBytes32());
+        srcOft.setRemoteOftToken(DST_CHAIN, address(oftToken));
 
         dstOft.setEid(SRC_CHAIN, SRC_EID);
         dstOft.setEid(DST_CHAIN, DST_EID);
         dstOft.setRemoteAdapter(SRC_CHAIN, address(srcOft).toBytes32());
+        dstOft.setRemoteOftToken(SRC_CHAIN, address(oftToken));
         vm.stopPrank();
     }
 

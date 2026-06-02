@@ -116,7 +116,7 @@ forge test --mt invariant -vvv
 FOUNDRY_PROFILE=ci forge test
 ```
 
-52 tests in total: pure-library unit + fuzz, full CCTP & OFT lifecycle, races, adversarial, invariants (16k+ calls), and **mainnet-fork** checks that run automatically when a mainnet RPC is available (otherwise they self-skip). Dependencies (git submodules under `lib/`): `forge-std`, `solady`.
+56 tests in total: pure-library unit + fuzz, full CCTP & OFT lifecycle, races, adversarial, invariants (16k+ calls), and **mainnet-fork** checks that run automatically when an RPC is available (otherwise they self-skip) — including an **Optimism fork end-to-end against the real USD₮0 OFT** that proves USD₮0 forwards our compose message, mints to the adapter, and settles. Dependencies (git submodules under `lib/`): `forge-std`, `solady`.
 
 ### A note on dependencies
 
@@ -126,7 +126,7 @@ CCTP's reference contracts are pinned to `solidity 0.7.6` (not importable into t
 ALCHEMY_API_KEY=... FOUNDRY_PROFILE=fork forge test --match-path "test/fork/**" -vvv
 ```
 
-`test/fork/CctpForkE2E.t.sol` does a **real** `depositForBurnWithHook` burn on a mainnet fork and validates our message parser + order encoding against the real emitted message — the dry-run that de-risked the live demo.
+`test/fork/CctpForkE2E.t.sol` does a **real** `depositForBurnWithHook` burn on a mainnet fork and validates our message parser + order encoding against the real emitted message — the dry-run that de-risked the live CCTP demo. `test/fork/OftForkE2E.t.sol` does the OFT analogue on an **Optimism** fork: it deploys the adapter against the real USD₮0 OFT + endpoint, drives the real `oft.lzReceive` (which mints real USD₮0 to the adapter and forwards our compose), then drives the real `endpoint.lzCompose` into the adapter to settle — proving the destination path before any live funds. Resolve OP/ARB RPCs from `OP_RPC_URL`/`ARB_RPC_URL` or `ALCHEMY_API_KEY`.
 
 ## Deploy
 
@@ -138,10 +138,10 @@ OFT=0x...  forge script script/DeployOftAdapter.s.sol  --rpc-url $RPC --broadcas
 After deploying an adapter on each chain, the owner wires the counterparts:
 
 - **CCTP:** `setDomain(chainId, cctpDomain)` for the local and each remote chain, `setRemoteAdapter(remoteChainId, remoteAdapterAsBytes32)`, and `setRemoteUsdc(remoteChainId, remoteUsdcAddress)`.
-- **OFT:** `setEid(chainId, lzEid)` similarly, then `setRemoteAdapter(...)`.
+- **OFT:** `setEid(chainId, lzEid)` similarly, then `setRemoteAdapter(...)` and `setRemoteOftToken(remoteChainId, remoteTokenAddress)` — an OFT token is a **different address per chain** (e.g. USD₮0 is `0x01bF…` on Optimism but `0xFd08…` on Arbitrum), so the source stamps the order's `outputToken` with the destination's token.
 
 Canonical mainnet addresses, domains, and eids are in [`script/config/Addresses.sol`](script/config/Addresses.sol). A worked, on-chain example is in [DEMO.md](DEMO.md).
 
 ## Status
 
-Prototype. Not audited. The pricing curve, surplus routing (currently → recipient), and relayer permissioning (currently permissionless, with an optional owner allowlist) are intended iteration points. The **OFT path** is proven in the local + fork harness; a live OFT demo (demo token + LayerZero peer/DVN wiring) is the next step.
+Prototype. Not audited. The pricing curve, surplus routing (currently → recipient), and relayer permissioning (currently permissionless, with an optional owner allowlist) are intended iteration points. The **CCTP path** is proven live on Base ⇄ Arbitrum. The **OFT path** targets **USD₮0** and is proven against the real USD₮0 OFT + LayerZero endpoint on an Optimism fork (compose forwarding + real mint + settle); a live USD₮0 demo is the next step.

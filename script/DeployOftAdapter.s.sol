@@ -6,9 +6,9 @@ import {OftAdapter} from "../src/adapters/OftAdapter.sol";
 import {Addresses} from "./config/Addresses.sol";
 
 /// @notice Deploy an OftAdapter wired to the canonical LayerZero v2 endpoint and a given OFT.
-/// @dev Env: OFT (address of the OFT this adapter bridges), optional OWNER, optional MAX_FEE_RATE.
-///      Post-deploy, the owner must call setEid(...) and setRemoteAdapter(...) for each counterpart
-///      chain (see README).
+/// @dev Env: OFT (address of the OFT this adapter bridges, e.g. USD₮0), optional OWNER, optional
+///      MAX_FEE_RATE. Post-deploy, the owner must call setEid(...), setRemoteAdapter(...), and
+///      setRemoteOftToken(...) for each counterpart chain (see README).
 contract DeployOftAdapter is Script {
     function run() external returns (OftAdapter adapter) {
         address owner = vm.envOr("OWNER", msg.sender);

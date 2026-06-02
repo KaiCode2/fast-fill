@@ -35,14 +35,23 @@ contract OftAdapter is FastFillBase, ILayerZeroComposer {
     mapping(uint32 chainId => uint32 eid) public chainIdToEid;
     mapping(uint32 eid => uint32 chainId) public eidToChainId;
 
+    /// @dev The OFT token address on each remote chain. A LayerZero OFT token has a DIFFERENT
+    ///      address per chain (e.g. USDT0 is 0x01bF... on Optimism but 0xFd08... on Arbitrum), so
+    ///      the source must stamp the order's `outputToken` with the DESTINATION's token (what is
+    ///      actually delivered there) — not its own local `oftToken`. Must equal the destination
+    ///      adapter's `oftToken`.
+    mapping(uint32 chainId => address token) public remoteOftToken;
+
     error NotEndpoint(address caller);
     error UntrustedLocalOFT(address from);
     error UntrustedPeer(bytes32 composeFrom);
     error UnknownEid(uint32 chainId);
+    error UnknownRemoteOftToken(uint32 chainId);
     error UntrustedSourceEid(uint32 srcEid);
     error WrongOutputToken(bytes32 outputToken);
 
     event EidConfigured(uint32 indexed chainId, uint32 indexed eid);
+    event RemoteOftTokenConfigured(uint32 indexed chainId, address indexed token);
 
     constructor(address owner_, uint256 maxFeeRate_, address endpoint_, address oft_)
         FastFillBase(owner_, maxFeeRate_)
@@ -90,7 +99,7 @@ contract OftAdapter is FastFillBase, ILayerZeroComposer {
         _pullAndSend(order, dstEid, extraOptions);
 
         emit OrderCreated(
-            orderId, OrderLib.BRIDGE_OFT, msg.sender, dstChainId, oftToken.toBytes32(), minAmountLD, nonce
+            orderId, OrderLib.BRIDGE_OFT, msg.sender, dstChainId, order.outputToken, order.outputAmount, nonce
         );
     }
 
@@ -104,6 +113,8 @@ contract OftAdapter is FastFillBase, ILayerZeroComposer {
         uint256 discountRate,
         uint64 nonce
     ) private view returns (Order memory order) {
+        address outToken = remoteOftToken[dstChainId];
+        if (outToken == address(0)) revert UnknownRemoteOftToken(dstChainId);
         order = Order({
             bridgeType: OrderLib.BRIDGE_OFT,
             srcChainId: uint32(block.chainid),
@@ -111,7 +122,7 @@ contract OftAdapter is FastFillBase, ILayerZeroComposer {
             sender: msg.sender.toBytes32(),
             recipient: recipient,
             inputToken: oftToken.toBytes32(),
-            outputToken: oftToken.toBytes32(),
+            outputToken: outToken.toBytes32(),
             inputAmount: inputAmount,
             outputAmount: minAmountLD,
             nonce: nonce,
@@ -175,5 +186,11 @@ contract OftAdapter is FastFillBase, ILayerZeroComposer {
         chainIdToEid[chainId] = eid;
         eidToChainId[eid] = chainId;
         emit EidConfigured(chainId, eid);
+    }
+
+    /// @notice Configure the OFT token address on a remote chain (used to stamp an order's outputToken).
+    function setRemoteOftToken(uint32 chainId, address token) external onlyOwner {
+        remoteOftToken[chainId] = token;
+        emit RemoteOftTokenConfigured(chainId, token);
     }
 }
