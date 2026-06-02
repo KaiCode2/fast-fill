@@ -67,7 +67,7 @@ flowchart TB
         OB["order book + status machine"]
         FILL["fill()"]
         SET["_settle() + _payout (pull-payment fallback)"]
-        REG["registries · pause · Ownable"]
+        REG["reads FastFillConfig · selfPermit/Permit2 · pause · Ownable"]
     end
     CA["CctpAdapter<br/>initiateCCTP() · settle()"]
     OA["OftAdapter<br/>initiateOFT() · lzCompose()"]
@@ -81,20 +81,26 @@ flowchart TB
 
 ```
 src/
-  FastFillBase.sol           abstract: order book, state machine, fill(), _settle(),
-                               pull-payment fallback, pause, ownership, registries
+  FastFillBase.sol           abstract: order book, state machine, fill()/fillFor(), _settle(),
+                               pull-payment fallback, selfPermit + Permit2 pulls, pause, ownership
+  config/
+    FastFillConfig.sol       immutable CREATE2 chain registry (the single source of chain config)
   adapters/
-    CctpAdapter.sol          initiateCCTP() + settle(message, attestation)
-    OftAdapter.sol           initiateOFT() + lzCompose()  [ILayerZeroComposer]
+    CctpAdapter.sol          initiateCCTP[For]() + settle(message, attestation)
+    OftAdapter.sol           initiateOFT[For]() + lzCompose()  [ILayerZeroComposer]
   libraries/
     OrderLib.sol             Order struct + keccak256(abi.encode) hashing + encode/decode
     PricingLib.sol           the fee curve (WAD, capped, monotonic)
+    PermitLib.sol            Permit2 order-intent / fill-auth witnesses + type strings
     BurnMessageV2Lib.sol     parse a CCTP v2 message (sourceDomain/messageSender/mintRecipient/...)
     OFTComposeMsgCodec.sol   decode a LayerZero OFT composed message
     AddressCast.sol          checked bytes32 <-> address
   interfaces/
     cctp/                    hand-written ^0.8 ITokenMessengerV2 / IMessageTransmitterV2
-    layerzero/               hand-written ILayerZeroComposer / IOFT
+    layerzero/               hand-written ILayerZeroComposer / IOFT / ILayerZeroEndpointV2
+    permit2/                 ISignatureTransfer (Permit2)
+    IERC20Permit.sol         EIP-2612
+    IFastFillConfig.sol      ChainConfig + registry interface
     IFastFill.sol            shared external surface + events + order record types
 ```
 

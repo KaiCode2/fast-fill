@@ -20,18 +20,19 @@ the order was filled) or flow straight to the recipient (if it was not).
 flowchart TB
     subgraph BASE["FastFillBase (abstract)"]
         OB["order book + status machine"]
-        FILL["fill()"]
+        FILL["fill() · fillFor() (Permit2)"]
         SET["_settle() + _payout (pull-payment fallback)"]
-        REG["registries: remoteAdapter, domains/eids, remoteUsdc"]
-        ADM["admin: pause, Ownable"]
+        PMT["selfPermit (2612) · Permit2 witness pulls · Multicallable"]
+        ADM["admin: pause, Ownable, maxFeeRate"]
     end
 
-    CA["CctpAdapter<br/>initiateCCTP() · settle(message, attestation)"]
-    OA["OftAdapter<br/>initiateOFT() · lzCompose()"]
+    CA["CctpAdapter<br/>initiateCCTP[For]() · settle(message, attestation)"]
+    OA["OftAdapter<br/>initiateOFT[For]() · lzCompose()"]
 
     CA -- inherits --> BASE
     OA -- inherits --> BASE
 
+    CFG["FastFillConfig<br/>immutable CREATE2 registry<br/>(domains/eids/tokens per chain)"]
     OL["OrderLib<br/>orderId = keccak256(abi.encode(order))"]
     PL["PricingLib<br/>time-decay premium (WAD, capped)"]
     BL["BurnMessageV2Lib<br/>parse CCTP v2 message"]
@@ -41,6 +42,8 @@ flowchart TB
     BASE --> OL
     BASE --> PL
     BASE --> AC
+    CA -- "reads at call time" --> CFG
+    OA -- "reads at call time" --> CFG
     CA --> BL
     OA --> CC
 ```
@@ -53,8 +56,9 @@ settles inbound ones, and is deployed on every supported chain.
 
 | Contract | Responsibility |
 |---|---|
-| `FastFillBase` | Order book, status machine, `fill`, `_settle`, `_payout` fallback, pricing call, pause, ownership, registries |
-| `CctpAdapter` | `initiateCCTP` (burn-with-hook) and `settle(message, attestation)` (wraps `receiveMessage`) |
+| `FastFillBase` | Order book, status machine, `fill`/`fillFor`, `_settle`, `_payout` fallback, pricing call, pause, ownership, EIP-2612 `selfPermit` + Permit2 pulls + `Multicallable` |
+| `FastFillConfig` | Immutable CREATE2 chain registry — per-chain CCTP/LZ addresses, domains, eids, USDC + USD₮0 tokens; the single source the adapters read at call time |
+| `CctpAdapter` | `initiateCCTP`/`initiateCCTPFor` (burn-with-hook) and `settle(message, attestation)` (wraps `receiveMessage`) |
 | `OftAdapter` | `initiateOFT` (`send` with `composeMsg`) and `lzCompose` (LayerZero compose callback) |
 | `OrderLib` | The `Order` struct and its canonical hash / encode / decode |
 | `PricingLib` | The time-decay fee curve (pure) |
@@ -194,24 +198,25 @@ flowchart TB
     MINT --> P["parse message via BurnMessageV2Lib"]
     P --> C1{"mintRecipient == this?"}
     C1 -->|no| R2["revert MintRecipientMismatch"]
-    C1 -->|yes| C2{"domainToChainId[srcDomain] == order.srcChainId?"}
+    C1 -->|yes| C2{"config.chainConfig(order.srcChainId).cctpDomain == srcDomain?"}
     C2 -->|no| R3["revert UntrustedSourceDomain"]
-    C2 -->|yes| C3{"messageSender == remoteAdapter[srcChainId]?"}
+    C2 -->|yes| C3{"messageSender == address(this)?"}
     C3 -->|no| R4["revert UntrustedSender (anti-forgery)"]
     C3 -->|yes| OK["_settle: reimburse filler or pay recipient"]
 ```
 
 Because the source sets `destinationCaller` to the destination adapter, **only that adapter can call
 `receiveMessage`**, so the mint and the settlement are one atomic transaction. The extra
-`messageSender == remoteAdapter[srcChainId]` check is critical anti-forgery: anyone can craft their
-own CCTP burn to our adapter with a fabricated order in `hookData`, but they cannot make the burn's
-`messageSender` be our registered source adapter — so such a burn can never be settled here (which
-would otherwise let an attacker pre-settle a real order's id and strand the genuine transfer).
+`messageSender == address(this)` check is critical anti-forgery: the adapter is CREATE2-deterministic,
+so its counterpart on every chain is the *same address*. Anyone can craft their own CCTP burn to our
+adapter with a fabricated order in `hookData`, but they cannot make the burn's `messageSender` be our
+adapter address — so such a burn can never be settled here (which would otherwise let an attacker
+pre-settle a real order's id and strand the genuine transfer).
 
 **Per-chain USDC.** USDC has a *different address on every chain*, so the source stamps
-`order.outputToken` with the **destination's** USDC (via the admin `remoteUsdc[dstChainId]` map),
-which must equal the destination adapter's own `usdc`. (This was a real bug surfaced by the live
-mainnet run — the single-token unit tests had masked it.)
+`order.outputToken` with the **destination's** USDC, resolved from `config.chainConfig(dstChainId).usdc`;
+the destination checks `order.outputToken` against its own `config.chainConfig(block.chainid).usdc`.
+(This was a real bug surfaced by the live mainnet run — the single-token unit tests had masked it.)
 
 CCTP interfaces are hand-written `^0.8` mirrors (`ITokenMessengerV2`, `IMessageTransmitterV2`)
 because Circle's reference contracts are pinned to solc `0.7.6` and can't be imported here.
@@ -221,7 +226,8 @@ because Circle's reference contracts are pinned to solc `0.7.6` and can't be imp
 ## 7. LayerZero OFT integration
 
 **Source.** `initiateOFT` pulls the OFT token and calls `OFT.send` with the order in `composeMsg`
-and `to == the destination adapter`. `outputAmount = minAmountLD`.
+and `to == address(this)` (our adapter on the dst chain — the same CREATE2 address). `outputAmount =
+minAmountLD`.
 
 **Destination.** The OFT credits the bridged tokens to the adapter during `_lzReceive`; then the
 endpoint invokes `lzCompose`, which is authenticated by **three gates**:
@@ -232,14 +238,14 @@ flowchart TB
     G1 -->|no| X1["revert NotEndpoint"]
     G1 -->|yes| G2{"from == local OFT?"}
     G2 -->|no| X2["revert UntrustedLocalOFT"]
-    G2 -->|yes| G3{"composeFrom == remoteAdapter[srcChainId]?"}
+    G2 -->|yes| G3{"composeFrom == address(this)?"}
     G3 -->|no| X3["revert UntrustedPeer"]
     G3 -->|yes| OK["decode Order, _settle"]
 ```
 
 This is the OFT analogue of CCTP's `destinationCaller` + `messageSender` checks: `composeFrom`
-(embedded in the verified message) must be our registered source adapter. LayerZero's
-`OFTComposeMsgCodec` layout is mirrored locally.
+(embedded in the verified message) must be our adapter's own address (`address(this)`, the same on
+every chain). LayerZero's `OFTComposeMsgCodec` layout is mirrored locally.
 
 ---
 
@@ -263,17 +269,30 @@ never pausable). Effects (status) are written before any external transfer; `fil
 
 ---
 
-## 9. Admin & configuration
+## 9. Configuration & admin
 
-Owner-gated (`Ownable`), per adapter:
+**All chain config is immutable and lives in [`FastFillConfig`](../src/config/FastFillConfig.sol)** —
+a contract CREATE2-deployed to one address on every chain, holding a per-chain row
+`{supported, cctpDomain, lzEid, usdc, cctpTokenMessenger, usdt0Oft, usdt0Token}` baked as constants.
+Each adapter takes a single `config` argument (plus `owner`, `maxFeeRate`, all identical across
+chains), so the adapters are themselves CREATE2-deterministic. There are **no owner setters for
+addresses, domains, eids, or counterparts** — those are read from the registry at call time, keyed by
+`block.chainid` for the local chain and by the order's chain ids for the remote side. The counterpart
+is always `address(this)`; "does the remote chain exist" is `config.supported`.
 
-- `setRemoteAdapter(chainId, bytes32)` — the adapter on each remote chain (CCTP mintRecipient /
-  destinationCaller, OFT `to`, and the OFT/CCTP peer used for the anti-forgery check).
-- CCTP: `setDomain(chainId, domain)`, `setRemoteUsdc(chainId, token)`.
-- OFT: `setEid(chainId, eid)`.
-- `setMaxFeeRate(rate)`, `setPaused(bool)`. Filling is **permissionless** — anyone may fill, since
-  the `orderId` invariant makes a fill against a fabricated order self-punishing (the filler simply
-  is never reimbursed). There is no filler allowlist.
+The adapter additionally **reads the local domain/eid/token live from the bridge contracts**
+(`MessageTransmitter.localDomain`, `Endpoint.eid`, `OFT.token`/`endpoint`) and reverts on any mismatch
+with the registry — so a wrong constant can't silently ship. Adding a chain means publishing a new
+registry version + adapters (a new deterministic address set).
+
+Owner-gated (`Ownable`) surface is intentionally tiny: `setMaxFeeRate(rate)` and `setPaused(bool)`.
+Filling is **permissionless** — anyone may fill, since the `orderId` invariant makes a fill against a
+fabricated order self-punishing (the filler is simply never reimbursed); there is no filler allowlist.
+
+**Gasless / sponsored funding.** `selfPermit` (EIP-2612) + `Multicallable` give a single-tx
+approve+act; `initiate*For` / `fillFor` pull from a signer who is not `msg.sender` via Permit2
+`permitWitnessTransferFrom`, with the witness bound to the order intent (or orderId) so a submitting
+relayer cannot alter what was signed.
 
 ---
 
@@ -284,8 +303,10 @@ Owner-gated (`Ownable`), per adapter:
 | Double-fill / fill-after-settle | `fill` requires `status == None`. |
 | Replay of a bridge message | CCTP `receiveMessage` consumes the nonce; LZ enforces nonce ordering; plus the `status != Settled` app guard. |
 | Fake-order fill | Non-matching `orderId` ⇒ never reimbursed (self-punishing). |
-| Forged CCTP burn to our adapter | `messageSender == remoteAdapter[srcChainId]` rejects burns not initiated by our source adapter. |
-| Forged OFT compose | Three gates: endpoint, local OFT, `composeFrom` peer. |
+| Forged CCTP burn to our adapter | `messageSender == address(this)` rejects burns not initiated by our (same-address) adapter. |
+| Forged OFT compose | Three gates: endpoint, local OFT, `composeFrom == address(this)`. |
+| Misconfigured registry | Local domain/eid/token are read live from the bridge contracts and cross-checked against `FastFillConfig`; a mismatch reverts. |
+| Sponsor altering a signed intent | Permit2 witness binds the order intent / orderId; a tampered order recovers a different signer and reverts (proven against real Permit2). |
 | Reentrancy | `nonReentrant` + checks-effects-interactions (status before transfers). |
 | Recipient/filler revert (e.g. USDC blacklist) | `_payout` falls back to the `claimable` ledger; settlement still completes. |
 | Surplus theft | Surplus is computed inside the authenticated settle and always routed to `order.recipient`; the filler is hard-capped at `outputAmount`. |

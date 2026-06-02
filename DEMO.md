@@ -78,6 +78,11 @@ gets the funds when CCTP settles, at no premium.
 
 ## How it was reproduced
 
+> Note: this run predates the config-registry refactor, so the deploy/wire steps below reflect the
+> original per-instance setters. The current flow deploys one immutable `FastFillConfig` (CREATE2)
+> and adapters that need no wiring — see [README → Deploy](README.md#deploy). The fill/attest/settle
+> mechanics are unchanged.
+
 1. **Deploy** `CctpAdapter` on each chain (`forge create`, constructor: owner, maxFeeRate,
    `TokenMessengerV2`, `MessageTransmitterV2`, USDC).
 2. **Wire** each: `setDomain`, `setRemoteAdapter`, `setRemoteUsdc` (addresses in
