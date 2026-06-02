@@ -123,6 +123,7 @@ abstract contract Fixtures is Test {
         uint64 startTime,
         uint64 expectedDeliveryTime,
         uint256 discountRate,
+        uint256 baseFee,
         uint64 nonce
     ) internal view returns (Order memory) {
         return Order({
@@ -138,7 +139,8 @@ abstract contract Fixtures is Test {
             nonce: nonce,
             startTime: startTime,
             expectedDeliveryTime: expectedDeliveryTime,
-            discountRate: discountRate
+            discountRate: discountRate,
+            baseFee: baseFee
         });
     }
 
@@ -148,6 +150,7 @@ abstract contract Fixtures is Test {
         uint64 startTime,
         uint64 expectedDeliveryTime,
         uint256 discountRate,
+        uint256 baseFee,
         uint64 nonce
     ) internal view returns (Order memory) {
         return Order({
@@ -163,7 +166,8 @@ abstract contract Fixtures is Test {
             nonce: nonce,
             startTime: startTime,
             expectedDeliveryTime: expectedDeliveryTime,
-            discountRate: discountRate
+            discountRate: discountRate,
+            baseFee: baseFee
         });
     }
 

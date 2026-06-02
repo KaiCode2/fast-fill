@@ -48,16 +48,17 @@ stateDiagram-v2
 
 ## Pricing
 
-The relayer's fee is largest right after the order's `startTime` (it fronts capital longest) and decays linearly to zero at `expectedDeliveryTime` — so a late or never-filled order costs the user nothing.
+The relayer's fee has two **additive** parts: an optional flat `baseFee` (a fixed price for the service, owed on any fill) and a time premium that is largest right after the order's `startTime` and decays linearly to zero at `expectedDeliveryTime` — so a late or never-filled order costs the user nothing beyond the bridge.
 
 ```
 timeSaved = max(0, expectedDeliveryTime − max(fillTime, startTime))
 rate      = min(discountRate · timeSaved, maxFeeRate)          [WAD]
-fee       = outputAmount · rate / 1e18
+timeFee   = outputAmount · rate / 1e18
+fee       = min(baseFee + timeFee, outputAmount)
 payout    = outputAmount − fee        (paid to the recipient at fill)
 ```
 
-`discountRate` is **per-order, user-chosen** (their speed/cost tradeoff); `maxFeeRate` is a **per-adapter governance cap**. The curve lives in [`PricingLib`](src/libraries/PricingLib.sol) and is trivial to swap.
+`baseFee` (output-token units, e.g. `10_000` = $0.01 USDC) and `discountRate` are **per-order, user-chosen** — set `baseFee = 0` for the pure time curve, or `discountRate = 0` for a flat fee; `maxFeeRate` is a **per-adapter governance cap** on the rate. Timing is **derived on-chain**: `startTime = block.timestamp` and the user signs a relative `deliveryWindow`, so `expectedDeliveryTime = block.timestamp + deliveryWindow` (the bridges expose no on-chain delivery-time getter). The curve lives in [`PricingLib`](src/libraries/PricingLib.sol) and is trivial to swap. Gas benchmarks — including the overhead fast-fill adds over a direct bridge call — are in [docs/GAS.md](docs/GAS.md).
 
 ## Architecture
 
@@ -124,7 +125,7 @@ forge test --mt invariant -vvv
 FOUNDRY_PROFILE=ci forge test
 ```
 
-66 tests in total: pure-library unit + fuzz, full CCTP & OFT lifecycle, races, adversarial, invariants (16k+ calls), gasless approval flows, and **mainnet-fork** checks that run automatically when an RPC is available (otherwise they self-skip) — including an **Optimism fork end-to-end against the real USD₮0 OFT** (proves USD₮0 forwards our compose, mints, settles) and a **fork against the real Permit2** (proves a sponsored intent's signature + witness binding). Dependencies (git submodules under `lib/`): `forge-std`, `solady`.
+75 tests in total: pure-library unit + fuzz (incl. the flat-base-fee + time-decay pricing curve), full CCTP & OFT lifecycle, races, adversarial, invariants (16k+ calls, now fuzzing the base fee too), gasless approval flows, gas benchmarks (`test/gas/` — see [docs/GAS.md](docs/GAS.md)), and **mainnet-fork** checks that run automatically when an RPC is available (otherwise they self-skip) — including an **Optimism fork end-to-end against the real USD₮0 OFT** (proves USD₮0 forwards our compose, mints, settles) and a **fork against the real Permit2** (proves a sponsored intent's signature + witness binding, including rejected recipient- and bridge-mode-tampering). Dependencies (git submodules under `lib/`): `forge-std`, `solady`.
 
 ### A note on dependencies
 
@@ -156,8 +157,8 @@ Because the registry, the owner, and the fee cap are identical across chains, ea
 Both adapters support signature-based funding so a user (or relayer) need only **sign**, not send:
 
 - **EIP-2612 single-tx** (self-submitted): batch a `selfPermit` before the action — `multicall([selfPermit(token, …), initiateCCTP(…)])` — so the approval and the bridge land in one transaction. Works for USDC and USD₮0 (both support `permit`).
-- **Permit2 sponsored intent** (`initiate*For` / `fillFor`): a user signs an off-chain bridge intent and hands it to relayers; a relayer submits it and pays gas, while the funds are pulled from the **signer** via Permit2 and the signer is recorded as the order's sender. The Permit2 signature commits to a **witness** (the order intent / the orderId), so the submitter cannot alter the recipient, amounts, timing, or rate — proven against the real Permit2 in [`test/fork/PermitFork.t.sol`](test/fork/PermitFork.t.sol), including a rejected tampering attempt.
+- **Permit2 sponsored intent** (`initiate*For` / `fillFor`): a user signs an off-chain bridge intent and hands it to relayers; a relayer submits it and pays gas, while the funds are pulled from the **signer** via Permit2 and the signer is recorded as the order's sender. The Permit2 signature commits to a **witness** (the order intent / the orderId), so the submitter cannot alter the recipient, amounts, timing, pricing, **or the bridge mode the user opted into** (CCTP fast/slow via `minFinalityThreshold`+`maxFee`; OFT executor options) — that mode is bound as a `bridgeParams` hash in the witness. Proven against the real Permit2 in [`test/fork/PermitFork.t.sol`](test/fork/PermitFork.t.sol), including rejected attempts to tamper with the recipient and to flip the bridge speed.
 
 ## Status
 
-Prototype. Not audited. The pricing curve and surplus routing (currently → recipient) are intended iteration points. Filling is **permissionless** — anyone may fill, since the `orderId` invariant makes a fill against a fabricated order self-punishing. Config is an **immutable CREATE2 registry** (deterministic adapter addresses, no per-deploy wiring); users and relayers can act via **EIP-2612 or Permit2 signatures** (single-tx or sponsored). The **CCTP path** is proven live on Base ⇄ Arbitrum. The **OFT path** targets **USD₮0** and is proven against the real USD₮0 OFT + LayerZero endpoint on an Optimism fork (compose forwarding + real mint + settle); a live USD₮0 demo is the next step.
+Prototype. Not audited. Surplus routing (currently → recipient) is an intended iteration point. Pricing is **user-flexible**: a flat `baseFee`, a time-decay premium, or both, with timing derived on-chain from a signed relative `deliveryWindow`. The **bridge mode** is the user's choice and is signed over in sponsored flows — CCTP fast vs finalized (`minFinalityThreshold` + `maxFee`); OFT executor options (`extraOptions`). Filling is **permissionless** — anyone may fill, since the `orderId` invariant makes a fill against a fabricated order self-punishing. Config is an **immutable CREATE2 registry** (deterministic adapter addresses, no per-deploy wiring); users and relayers can act via **EIP-2612 or Permit2 signatures** (single-tx or sponsored). The **CCTP path** is proven live on Base ⇄ Arbitrum. The **OFT path** targets **USD₮0** and is proven against the real USD₮0 OFT + LayerZero endpoint on an Optimism fork (compose forwarding + real mint + settle); a live USD₮0 demo is the next step.

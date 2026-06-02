@@ -34,7 +34,7 @@ flowchart TB
 
     CFG["FastFillConfig<br/>immutable CREATE2 registry<br/>(domains/eids/tokens per chain)"]
     OL["OrderLib<br/>orderId = keccak256(abi.encode(order))"]
-    PL["PricingLib<br/>time-decay premium (WAD, capped)"]
+    PL["PricingLib<br/>flat baseFee + time-decay premium (WAD, capped)"]
     BL["BurnMessageV2Lib<br/>parse CCTP v2 message"]
     CC["OFTComposeMsgCodec<br/>decode LZ compose"]
     AC["AddressCast"]
@@ -163,21 +163,34 @@ sequenceDiagram
 
 ## 5. Pricing
 
-The relayer's fee is largest right after the order's `startTime` (it fronts capital longest) and
-decays linearly to zero at `expectedDeliveryTime` — so a late or never-filled order costs the user
-nothing.
+The fee a relayer earns has two **additive** parts: an optional flat `baseFee` owed on any fill, and a
+time premium that is largest right after `startTime` (the relayer fronts capital longest) and decays
+linearly to zero at `expectedDeliveryTime`. A late or never-filled order costs the user nothing beyond
+the bridge.
 
 ```
 timeSaved = max(0, expectedDeliveryTime - max(fillTime, startTime))
 rate      = min(discountRate * timeSaved, maxFeeRate)          [WAD]
-fee       = outputAmount * rate / 1e18                          (<= outputAmount)
+timeFee   = outputAmount * rate / 1e18
+fee       = min(baseFee + timeFee, outputAmount)
 payout    = outputAmount - fee     (paid to the recipient at fill time)
 ```
 
-- `discountRate` is **per-order, user-chosen** (their speed/cost tradeoff).
-- `maxFeeRate` is a **per-adapter governance cap** (`<= 1e18`).
-- The curve is a standalone pure library (`PricingLib`) — monotonic, capped, overflow-safe — so the
-  exact model is trivial to swap.
+- `baseFee` is **per-order, user-chosen**, in output-token units (e.g. `10_000` = $0.01 USDC). It lets
+  a user pay a fixed price for the relaying service regardless of timing. `baseFee == 0` is the pure
+  time curve; `discountRate == 0` is a pure flat fee. It is validated `< outputAmount` at create time,
+  and the combined fee is capped at `outputAmount` so the recipient payout never underflows.
+- `discountRate` is **per-order, user-chosen** (the time-premium accrual per second).
+- `maxFeeRate` is a **per-adapter governance cap** on the *rate* (`<= 1e18`); `baseFee` is uncapped by
+  governance — it is the user's own choice, like `discountRate`.
+- The curve is a standalone pure library (`PricingLib`) — monotonic in fill time, capped, overflow-safe.
+
+**Timing is derived on-chain.** Both `startTime` and `expectedDeliveryTime` are set by the contract:
+`startTime = block.timestamp`, and the user supplies a **relative `deliveryWindow`** (seconds) from
+which `expectedDeliveryTime = block.timestamp + deliveryWindow`. The bridges expose no on-chain
+"expected delivery time" getter, so the window is the user's estimate (off-chain clients seed a sane
+default from known bridge latencies). Signing a *relative* window — rather than an absolute timestamp —
+means the window the user agreed to holds no matter when a sponsoring relayer actually submits.
 
 ---
 
@@ -218,6 +231,17 @@ pre-settle a real order's id and strand the genuine transfer).
 the destination checks `order.outputToken` against its own `config.chainConfig(block.chainid).usdc`.
 (This was a real bug surfaced by the live mainnet run — the single-token unit tests had masked it.)
 
+**Bridge mode (user-chosen, signed).** The user picks the transfer speed via `minFinalityThreshold`
+(`FINALITY_FAST = 1000` → a fast soft-finality transfer, charging up to `maxFee`; `FINALITY_FINALIZED
+= 2000` → wait for hard finality, set `maxFee = 0`) and the fast-fee budget via `maxFee`. fast-fill
+deliberately does **not** use Circle's auto-relay/forwarding: it sets `destinationCaller =
+address(this)` so only this adapter can call `receiveMessage`, which keeps the mint and the
+optimistic-fill reconciliation in one atomic transaction (and stops a griefer from consuming the
+message nonce without running `_settle`). Settlement is therefore **permissionless but
+adapter-mediated** — anyone may relay the `settle` call, there is no auto-forwarder. Both knobs are
+the user's: their own tx in the self-submitted path, and bound into the signature (`bridgeParams`, §9)
+in the sponsored path.
+
 CCTP interfaces are hand-written `^0.8` mirrors (`ITokenMessengerV2`, `IMessageTransmitterV2`)
 because Circle's reference contracts are pinned to solc `0.7.6` and can't be imported here.
 
@@ -246,6 +270,15 @@ flowchart TB
 This is the OFT analogue of CCTP's `destinationCaller` + `messageSender` checks: `composeFrom`
 (embedded in the verified message) must be our adapter's own address (`address(this)`, the same on
 every chain). LayerZero's `OFTComposeMsgCodec` layout is mirrored locally.
+
+**Bridge mode (executor).** Unlike CCTP, an OFT has **no per-transaction fast/slow switch** — delivery
+speed is the pathway's DVN/confirmation configuration, set per-OApp by the OFT owner (fixed for USD₮0).
+What the user controls is `extraOptions`: the executor/DVN options, which must include a compose-gas
+allowance so the LayerZero **executor auto-delivers** `lzReceive` (the mint) and `lzCompose` (the
+settle), paid by the `msg.value` native fee at the source. So OFT settlement *is* auto-delivered by the
+executor (and anyone may also drive a queued compose), whereas CCTP settlement is relayed to our
+`settle`. The user's `extraOptions` is **signed** in the sponsored path (`bridgeParams`, §9), so a
+relayer cannot downgrade the executor configuration the user opted into.
 
 ---
 
@@ -292,7 +325,11 @@ fabricated order self-punishing (the filler is simply never reimbursed); there i
 **Gasless / sponsored funding.** `selfPermit` (EIP-2612) + `Multicallable` give a single-tx
 approve+act; `initiate*For` / `fillFor` pull from a signer who is not `msg.sender` via Permit2
 `permitWitnessTransferFrom`, with the witness bound to the order intent (or orderId) so a submitting
-relayer cannot alter what was signed.
+relayer cannot alter what was signed. The order-intent witness binds the recipient, the amounts, the
+relative `deliveryWindow`, the `discountRate`, the `baseFee`, **and** a `bridgeParams` hash of the
+transport mode the user opted into (CCTP: `keccak256(maxFee, minFinalityThreshold)`; OFT:
+`keccak256(extraOptions)`) — so a relayer can neither re-price, re-time, nor change the bridging
+speed / executor of a signed intent.
 
 ---
 
@@ -306,7 +343,7 @@ relayer cannot alter what was signed.
 | Forged CCTP burn to our adapter | `messageSender == address(this)` rejects burns not initiated by our (same-address) adapter. |
 | Forged OFT compose | Three gates: endpoint, local OFT, `composeFrom == address(this)`. |
 | Misconfigured registry | Local domain/eid/token are read live from the bridge contracts and cross-checked against `FastFillConfig`; a mismatch reverts. |
-| Sponsor altering a signed intent | Permit2 witness binds the order intent / orderId; a tampered order recovers a different signer and reverts (proven against real Permit2). |
+| Sponsor altering a signed intent | Permit2 witness binds the order intent / orderId **and the opted-into bridge mode** (`bridgeParams`); a tampered order — or a flipped fast/slow / executor option — recovers a different signer and reverts (both proven against real Permit2). |
 | Reentrancy | `nonReentrant` + checks-effects-interactions (status before transfers). |
 | Recipient/filler revert (e.g. USDC blacklist) | `_payout` falls back to the `claimable` ledger; settlement still completes. |
 | Surplus theft | Surplus is computed inside the authenticated settle and always routed to `order.recipient`; the filler is hard-capped at `outputAmount`. |

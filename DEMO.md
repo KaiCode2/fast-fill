@@ -88,7 +88,9 @@ gets the funds when CCTP settles, at no premium.
 2. **Wire** each: `setDomain`, `setRemoteAdapter`, `setRemoteUsdc` (addresses in
    [`script/config/Addresses.sol`](script/config/Addresses.sol)).
 3. **Initiate** on the source: approve the adapter, then `initiateCCTP(dstChainId, recipient,
-   amount, maxFee, minFinalityThreshold=1000, expectedDeliveryTime, discountRate)`.
+   amount, maxFee, minFinalityThreshold, deliveryWindow, discountRate, baseFee)` — `minFinalityThreshold`
+   is 1000 (fast) or 2000 (finalized); `deliveryWindow` is relative seconds; `baseFee` is the flat fee
+   (0 for none). (This historical run predated the relative-window + base-fee additions.)
 4. **(optional) Fill** on the destination before settlement: relayer approves the adapter and calls
    `fill(order)`.
 5. **Attest:** poll Circle's API

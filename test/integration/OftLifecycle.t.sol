@@ -24,15 +24,21 @@ contract OftLifecycleTest is Fixtures {
     // ---------------------------------------------------------------------------------------------
 
     function _createOrder() internal returns (Order memory order, bytes32 orderId) {
+        return _createOrderWithBase(0);
+    }
+
+    /// @dev `deliveryWindow` is relative; the adapter derives `expectedDeliveryTime = block.timestamp
+    ///      + WINDOW`, equal to `start + WINDOW` here.
+    function _createOrderWithBase(uint256 baseFee) internal returns (Order memory order, bytes32 orderId) {
         uint64 start = uint64(block.timestamp);
         oftToken.mint(user, INPUT);
         vm.chainId(SRC_CHAIN);
         vm.startPrank(user);
         oftToken.approve(address(srcOft), INPUT);
         uint64 nonce;
-        (orderId, nonce) = srcOft.initiateOFT(DST_CHAIN, _b32(recipient), INPUT, MIN_OUT, "", start + WINDOW, RATE);
+        (orderId, nonce) = srcOft.initiateOFT(DST_CHAIN, _b32(recipient), INPUT, MIN_OUT, "", WINDOW, RATE, baseFee);
         vm.stopPrank();
-        order = _oftOrder(INPUT, MIN_OUT, start, start + WINDOW, RATE, nonce);
+        order = _oftOrder(INPUT, MIN_OUT, start, start + WINDOW, RATE, baseFee, nonce);
     }
 
     function _fillAt(Order memory order, address filler, uint256 fillTime) internal returns (uint256 payout) {
@@ -81,7 +87,7 @@ contract OftLifecycleTest is Fixtures {
         uint256 payout = _fillAt(order, relayer, fillTime);
 
         uint256 expFee = PricingLib.fee(
-            order.outputAmount, order.startTime, order.expectedDeliveryTime, fillTime, RATE, MAX_FEE_RATE
+            order.outputAmount, order.startTime, order.expectedDeliveryTime, fillTime, RATE, MAX_FEE_RATE, order.baseFee
         );
         assertEq(payout, order.outputAmount - expFee, "payout");
         assertGt(expFee, 0, "fee charged");
@@ -107,6 +113,24 @@ contract OftLifecycleTest is Fixtures {
         _deliver(order, INPUT);
         assertEq(oftToken.balanceOf(recipient), INPUT, "recipient gets all");
         assertEq(uint8(dstOft.getOrder(orderId).status), uint8(FillStatus.Settled), "settled");
+    }
+
+    function test_baseFee_flatPremiumAppliedAndReimbursed() public {
+        uint256 baseFee = 1e18; // a flat 1-token fee, additive to the time premium
+        (Order memory order,) = _createOrderWithBase(baseFee);
+        uint256 fillTime = order.startTime + 20;
+        uint256 payout = _fillAt(order, relayer, fillTime);
+
+        uint256 expFee = PricingLib.fee(
+            order.outputAmount, order.startTime, order.expectedDeliveryTime, fillTime, RATE, MAX_FEE_RATE, baseFee
+        );
+        assertGe(expFee, baseFee, "fee includes at least the flat base");
+        assertEq(payout, order.outputAmount - expFee, "payout reduced by base + time fee");
+
+        _deliver(order, INPUT);
+        uint256 surplus = INPUT - order.outputAmount;
+        assertEq(oftToken.balanceOf(relayer), order.outputAmount, "filler reimbursed outputAmount");
+        assertEq(oftToken.balanceOf(recipient), payout + surplus, "recipient: payout + surplus");
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -192,7 +216,7 @@ contract OftLifecycleTest is Fixtures {
 
     function test_fakeOrderFill_selfPunishes() public {
         Order memory fake =
-            _oftOrder(500e18, 499e18, uint64(block.timestamp), uint64(block.timestamp) + WINDOW, RATE, 999);
+            _oftOrder(500e18, 499e18, uint64(block.timestamp), uint64(block.timestamp) + WINDOW, RATE, 0, 999);
         bytes32 fakeId = OrderLib.hash(fake);
 
         uint256 payout = _fillAt(fake, relayer, fake.startTime + 10);

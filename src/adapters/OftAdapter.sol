@@ -64,23 +64,30 @@ contract OftAdapter is FastFillBase, ILayerZeroComposer {
     /// @notice Send the OFT token to `dstChainId` and create an optimistically-fillable order.
     ///         `msg.sender` is the user and the payer (approve this adapter for the token).
     /// @dev `msg.value` pays the LayerZero native messaging fee (size it off-chain via quoteSend).
-    ///      `extraOptions` must include a compose-gas allowance (OptionsBuilder.addExecutorLzComposeOption).
+    ///      `extraOptions` is the user's chosen executor/DVN configuration — typically it must include
+    ///      a compose-gas allowance (OptionsBuilder.addExecutorLzComposeOption) so the LayerZero
+    ///      executor auto-delivers `lzCompose` (settlement). It is the user's per-tx opt-in to executor
+    ///      behaviour; in the sponsored path it is bound into the Permit2 witness (relayer can't change it).
     /// @param minAmountLD The slippage floor, used as the deterministic `outputAmount` the filler is owed.
+    /// @param deliveryWindow Seconds until the time premium decays to 0; `expectedDeliveryTime` is
+    ///                       derived on-chain as `block.timestamp + deliveryWindow`.
+    /// @param discountRate Time-premium accrual per second (WAD); `baseFee` is a flat fee on any fill.
     function initiateOFT(
         uint32 dstChainId,
         bytes32 recipient,
         uint256 inputAmount,
         uint256 minAmountLD,
         bytes calldata extraOptions,
-        uint64 expectedDeliveryTime,
-        uint256 discountRate
+        uint64 deliveryWindow,
+        uint256 discountRate,
+        uint256 baseFee
     ) external payable whenNotPaused returns (bytes32 orderId, uint64 nonce) {
         SafeTransferLib.safeTransferFrom(
             config.chainConfig(block.chainid).usdt0Token, msg.sender, address(this), inputAmount
         );
         nonce = _nextNonce();
         Order memory order = _buildOrder(
-            msg.sender, dstChainId, recipient, inputAmount, minAmountLD, expectedDeliveryTime, discountRate, nonce
+            msg.sender, dstChainId, recipient, inputAmount, minAmountLD, deliveryWindow, discountRate, baseFee, nonce
         );
         _assertCreatable(order);
         orderId = _finishInitiate(order, extraOptions);
@@ -89,24 +96,28 @@ contract OftAdapter is FastFillBase, ILayerZeroComposer {
     /// @notice Sponsored initiate: a third party submits and pays the LayerZero fee (`msg.value`),
     ///         while the token is pulled from `from` against its Permit2 signature and `from` is
     ///         recorded as the order's sender. The signature commits to `orderWitness(...)`, so the
-    ///         submitter cannot alter what `from` agreed to — the on-chain half of a signed intent.
+    ///         submitter cannot alter what `from` agreed to — including the executor configuration,
+    ///         which is bound via `bridgeParams = keccak256(extraOptions)`. `deliveryWindow` is
+    ///         relative, so the signed window holds regardless of when the relayer submits.
     function initiateOFTFor(
         uint32 dstChainId,
         bytes32 recipient,
         uint256 inputAmount,
         uint256 minAmountLD,
         bytes calldata extraOptions,
-        uint64 expectedDeliveryTime,
+        uint64 deliveryWindow,
         uint256 discountRate,
+        uint256 baseFee,
         address from,
         PermitLib.Permit2Data calldata permit
     ) external payable whenNotPaused returns (bytes32 orderId, uint64 nonce) {
         nonce = _nextNonce();
         Order memory order = _buildOrder(
-            from, dstChainId, recipient, inputAmount, minAmountLD, expectedDeliveryTime, discountRate, nonce
+            from, dstChainId, recipient, inputAmount, minAmountLD, deliveryWindow, discountRate, baseFee, nonce
         );
         _assertCreatable(order);
-        _pullOrderViaPermit2(order, from, permit); // pull AFTER building so the witness binds the order
+        // Pull AFTER building so the witness binds the order; bind the opted-into executor config too.
+        _pullOrderViaPermit2(order, from, permit, keccak256(extraOptions));
         orderId = _finishInitiate(order, extraOptions);
     }
 
@@ -125,15 +136,18 @@ contract OftAdapter is FastFillBase, ILayerZeroComposer {
         );
     }
 
-    /// @dev Split out to keep each stack frame shallow (avoids stack-too-deep).
+    /// @dev Split out to keep each stack frame shallow (avoids stack-too-deep). Timing is derived
+    ///      fully on-chain: `startTime = block.timestamp`, `expectedDeliveryTime = startTime +
+    ///      deliveryWindow` (checked add reverts on overflow).
     function _buildOrder(
         address from,
         uint32 dstChainId,
         bytes32 recipient,
         uint256 inputAmount,
         uint256 minAmountLD,
-        uint64 expectedDeliveryTime,
+        uint64 deliveryWindow,
         uint256 discountRate,
+        uint256 baseFee,
         uint64 nonce
     ) private view returns (Order memory order) {
         address inToken = config.chainConfig(block.chainid).usdt0Token;
@@ -152,8 +166,9 @@ contract OftAdapter is FastFillBase, ILayerZeroComposer {
             outputAmount: minAmountLD,
             nonce: nonce,
             startTime: uint64(block.timestamp),
-            expectedDeliveryTime: expectedDeliveryTime,
-            discountRate: discountRate
+            expectedDeliveryTime: uint64(block.timestamp) + deliveryWindow,
+            discountRate: discountRate,
+            baseFee: baseFee
         });
     }
 

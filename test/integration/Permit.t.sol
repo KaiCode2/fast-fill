@@ -52,8 +52,7 @@ contract PermitTest is Fixtures {
         bytes[] memory calls = new bytes[](2);
         calls[0] = abi.encodeCall(cctp.selfPermit, (address(usdc), INPUT, deadline, v, r, s));
         calls[1] = abi.encodeCall(
-            cctp.initiateCCTP,
-            (DST_CHAIN, _b32(recipient), INPUT, MAX_FEE, 1000, uint64(block.timestamp) + WINDOW, RATE)
+            cctp.initiateCCTP, (DST_CHAIN, _b32(recipient), INPUT, MAX_FEE, 1000, WINDOW, RATE, uint256(0))
         );
 
         // No prior approve() — the permit inside the same tx authorizes the pull.
@@ -73,7 +72,6 @@ contract PermitTest is Fixtures {
         usdc.approve(cctp.PERMIT2(), type(uint256).max); // one-time Permit2 approval
 
         vm.chainId(SRC_CHAIN);
-        uint64 exp = uint64(block.timestamp) + WINDOW;
         address relayerSubmitter = makeAddr("relayerSubmitter");
         vm.prank(relayerSubmitter);
         cctp.initiateCCTPFor(
@@ -82,8 +80,9 @@ contract PermitTest is Fixtures {
             INPUT,
             MAX_FEE,
             1000,
-            exp,
+            WINDOW,
             RATE,
+            0,
             permitUser,
             PermitLib.Permit2Data({nonce: 0, deadline: block.timestamp + 1, signature: ""})
         );
@@ -91,10 +90,22 @@ contract PermitTest is Fixtures {
         assertEq(usdc.balanceOf(permitUser), 0, "USDC pulled from the signer, not the submitter");
         Order memory burned = OrderLib.decode(tokenMessenger.lastHookData());
         assertEq(burned.sender, _b32(permitUser), "order sender = signer");
+        // The witness binds the relative window (WINDOW), the base fee (0), and the bridge mode the
+        // user opted into (maxFee + minFinalityThreshold), so a relayer cannot alter any of them.
         assertEq(
             MockPermit2(cctp.PERMIT2()).lastWitness(),
-            PermitLib.orderWitness(OrderLib.BRIDGE_CCTP, DST_CHAIN, _b32(recipient), INPUT, INPUT - MAX_FEE, exp, RATE),
-            "signature bound to the order intent"
+            PermitLib.orderWitness(
+                OrderLib.BRIDGE_CCTP,
+                DST_CHAIN,
+                _b32(recipient),
+                INPUT,
+                INPUT - MAX_FEE,
+                WINDOW,
+                RATE,
+                0,
+                keccak256(abi.encode(MAX_FEE, uint32(1000)))
+            ),
+            "signature bound to the order intent + bridge mode"
         );
     }
 
@@ -112,8 +123,9 @@ contract PermitTest is Fixtures {
             INPUT,
             MAX_FEE,
             1000,
-            uint64(block.timestamp) + WINDOW,
+            WINDOW,
             RATE,
+            0,
             permitUser,
             PermitLib.Permit2Data({nonce: 0, deadline: block.timestamp + 1, signature: ""})
         );
@@ -123,7 +135,7 @@ contract PermitTest is Fixtures {
 
     function test_fillFor_pullsFromFiller_bindsOrderId() public {
         Order memory order =
-            _cctpOrder(INPUT, MAX_FEE, uint64(block.timestamp), uint64(block.timestamp) + WINDOW, RATE, 0);
+            _cctpOrder(INPUT, MAX_FEE, uint64(block.timestamp), uint64(block.timestamp) + WINDOW, RATE, 0, 0);
         bytes32 orderId = OrderLib.hash(order);
 
         address signedFiller = makeAddr("signedFiller");

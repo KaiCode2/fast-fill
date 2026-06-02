@@ -60,13 +60,19 @@ contract CctpFastFillHandler is Test {
         return bytes32(uint256(uint160(a)));
     }
 
-    function createOrder(uint256 amountSeed, uint256 feeSeed, uint64 windowSeed, uint256 rateSeed, uint256 recipSeed)
-        external
-    {
+    function createOrder(
+        uint256 amountSeed,
+        uint256 feeSeed,
+        uint64 windowSeed,
+        uint256 rateSeed,
+        uint256 baseSeed,
+        uint256 recipSeed
+    ) external {
         uint256 amount = bound(amountSeed, 2, 1e12);
         uint256 maxFee = bound(feeSeed, 1, amount - 1);
         uint64 window = uint64(bound(windowSeed, 1, 1000));
         uint256 rate = bound(rateSeed, 0, 1e15);
+        uint256 baseFee = bound(baseSeed, 0, amount - maxFee - 1); // must stay < outputAmount
         address recip = recipients[recipSeed % recipients.length];
 
         usdc.mint(userA, amount);
@@ -75,7 +81,7 @@ contract CctpFastFillHandler is Test {
         vm.startPrank(userA);
         usdc.approve(address(src), amount);
         (bytes32 orderId, uint64 nonce) =
-            src.initiateCCTP(DST_CHAIN, _b32(recip), amount, maxFee, 1000, start + window, rate);
+            src.initiateCCTP(DST_CHAIN, _b32(recip), amount, maxFee, 1000, window, rate, baseFee);
         vm.stopPrank();
 
         Order memory o = Order({
@@ -91,7 +97,8 @@ contract CctpFastFillHandler is Test {
             nonce: nonce,
             startTime: start,
             expectedDeliveryTime: start + window,
-            discountRate: rate
+            discountRate: rate,
+            baseFee: baseFee
         });
         orders.push(o);
         if (!seen[orderId]) {

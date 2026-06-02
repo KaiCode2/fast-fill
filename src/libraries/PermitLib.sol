@@ -17,13 +17,17 @@ library PermitLib {
     }
 
     // --- Order intent (binds a sponsored `initiate*For`): a relayer cannot change the recipient,
-    //     amounts, timing, or rate the signer agreed to. `srcChainId`/`nonce`/`startTime` are
-    //     contract-assigned and `sender` is the signer, so they are not part of the witness. ---
+    //     amounts, timing, pricing, or bridge mode the signer agreed to. `srcChainId`/`nonce`/
+    //     `startTime` are contract-assigned and `sender` is the signer, so they are not part of the
+    //     witness. Timing is bound as a relative `deliveryWindow` (seconds) — not an absolute
+    //     timestamp — so the window the signer agreed to holds no matter when the relayer submits.
+    //     `bridgeParams` is a per-bridge hash of the transport mode the user opted into (CCTP:
+    //     maxFee + minFinalityThreshold; OFT: extraOptions), so a relayer cannot downgrade it. ---
     bytes32 internal constant ORDER_INTENT_TYPEHASH = keccak256(
-        "OrderIntent(uint8 bridgeType,uint32 dstChainId,bytes32 recipient,uint256 inputAmount,uint256 outputAmount,uint64 expectedDeliveryTime,uint256 discountRate)"
+        "OrderIntent(uint8 bridgeType,uint32 dstChainId,bytes32 recipient,uint256 inputAmount,uint256 outputAmount,uint64 deliveryWindow,uint256 discountRate,uint256 baseFee,bytes32 bridgeParams)"
     );
     string internal constant ORDER_WITNESS_TYPE_STRING =
-        "OrderIntent witness)OrderIntent(uint8 bridgeType,uint32 dstChainId,bytes32 recipient,uint256 inputAmount,uint256 outputAmount,uint64 expectedDeliveryTime,uint256 discountRate)TokenPermissions(address token,uint256 amount)";
+        "OrderIntent witness)OrderIntent(uint8 bridgeType,uint32 dstChainId,bytes32 recipient,uint256 inputAmount,uint256 outputAmount,uint64 deliveryWindow,uint256 discountRate,uint256 baseFee,bytes32 bridgeParams)TokenPermissions(address token,uint256 amount)";
 
     // --- Fill authorization (binds a sponsored `fillFor`): a filler's funds can only be pulled to
     //     fill the exact order whose id they signed. ---
@@ -37,8 +41,10 @@ library PermitLib {
         bytes32 recipient,
         uint256 inputAmount,
         uint256 outputAmount,
-        uint64 expectedDeliveryTime,
-        uint256 discountRate
+        uint64 deliveryWindow,
+        uint256 discountRate,
+        uint256 baseFee,
+        bytes32 bridgeParams
     ) internal pure returns (bytes32) {
         return keccak256(
             abi.encode(
@@ -48,8 +54,10 @@ library PermitLib {
                 recipient,
                 inputAmount,
                 outputAmount,
-                expectedDeliveryTime,
-                discountRate
+                deliveryWindow,
+                discountRate,
+                baseFee,
+                bridgeParams
             )
         );
     }

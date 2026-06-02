@@ -2,6 +2,7 @@
 pragma solidity ^0.8.26;
 
 import {Vm} from "forge-std/Vm.sol";
+import {console2} from "forge-std/console2.sol";
 import {ForkBase} from "./ForkBase.sol";
 import {CctpAdapter} from "../../src/adapters/CctpAdapter.sol";
 import {FastFillConfig} from "../../src/config/FastFillConfig.sol";
@@ -57,8 +58,12 @@ contract CctpForkE2ETest is ForkBase {
         vm.startPrank(user);
         IERC20Min(usdc).approve(address(adapter), AMOUNT);
         // maxFee = 0, minFinalityThreshold = 2000 => a standard (finalized) transfer, no fast fee.
+        // deliveryWindow is relative; expectedDeliveryTime is derived on-chain as start + WINDOW.
+        uint256 g0 = gasleft();
         (_orderIdFromInit, nonce) =
-            adapter.initiateCCTP(BASE_CHAIN, recipient.toBytes32(), AMOUNT, 0, 2000, start + WINDOW, RATE);
+            adapter.initiateCCTP(BASE_CHAIN, recipient.toBytes32(), AMOUNT, 0, 2000, WINDOW, RATE, 0);
+        // Real end-to-end source gas through fast-fill (vs the mock numbers in test/gas/GasBench).
+        console2.log("FORK real initiateCCTP gas (incl. real CCTP burn):", g0 - gasleft());
         vm.stopPrank();
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
@@ -84,7 +89,8 @@ contract CctpForkE2ETest is ForkBase {
             nonce: nonce,
             startTime: start,
             expectedDeliveryTime: start + WINDOW,
-            discountRate: RATE
+            discountRate: RATE,
+            baseFee: 0
         });
     }
 

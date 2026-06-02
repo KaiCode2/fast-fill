@@ -47,6 +47,7 @@ abstract contract FastFillBase is IFastFill, Ownable, ReentrancyGuard, Multicall
     error InvalidMaxFeeRate(uint256 maxFeeRate);
     error InvalidWindow(uint64 startTime, uint64 expectedDeliveryTime);
     error InvalidOutputAmount(uint256 outputAmount, uint256 inputAmount);
+    error InvalidBaseFee(uint256 baseFee, uint256 outputAmount);
     error UnsupportedChain(uint32 chainId);
     error NotSourceChain(uint32 srcChainId);
     error ZeroRecipient();
@@ -164,7 +165,8 @@ abstract contract FastFillBase is IFastFill, Ownable, ReentrancyGuard, Multicall
             order.expectedDeliveryTime,
             block.timestamp,
             order.discountRate,
-            maxFeeRate
+            maxFeeRate,
+            order.baseFee
         );
         payout = order.outputAmount - fee;
 
@@ -246,15 +248,26 @@ abstract contract FastFillBase is IFastFill, Ownable, ReentrancyGuard, Multicall
 
     /// @dev Pull `order.inputAmount` of the order's input token from `from` via Permit2, binding the
     ///      signature to the order intent so a sponsor cannot alter it. Used by `initiate*For`.
-    function _pullOrderViaPermit2(Order memory order, address from, PermitLib.Permit2Data calldata permit) internal {
+    /// @param bridgeParams A per-adapter hash of the transport mode `from` opted into (so a relayer
+    ///        cannot downgrade fast/slow or executor settings). The timing is bound as the relative
+    ///        `deliveryWindow` the signer agreed to, recovered exactly from the just-built order
+    ///        (`startTime == block.timestamp` at build), not as a submit-dependent absolute time.
+    function _pullOrderViaPermit2(
+        Order memory order,
+        address from,
+        PermitLib.Permit2Data calldata permit,
+        bytes32 bridgeParams
+    ) internal {
         bytes32 witness = PermitLib.orderWitness(
             order.bridgeType,
             order.dstChainId,
             order.recipient,
             order.inputAmount,
             order.outputAmount,
-            order.expectedDeliveryTime,
-            order.discountRate
+            order.expectedDeliveryTime - order.startTime,
+            order.discountRate,
+            order.baseFee,
+            bridgeParams
         );
         _pullViaPermit2(
             order.inputToken.toAddress(),
@@ -340,6 +353,9 @@ abstract contract FastFillBase is IFastFill, Ownable, ReentrancyGuard, Multicall
         if (order.outputAmount == 0 || order.outputAmount > order.inputAmount) {
             revert InvalidOutputAmount(order.outputAmount, order.inputAmount);
         }
+        // The flat baseFee must leave the recipient something at fill; the combined fee is additionally
+        // capped at outputAmount inside PricingLib.
+        if (order.baseFee >= order.outputAmount) revert InvalidBaseFee(order.baseFee, order.outputAmount);
         if (order.recipient == bytes32(0)) revert ZeroRecipient();
     }
 
@@ -354,7 +370,13 @@ abstract contract FastFillBase is IFastFill, Ownable, ReentrancyGuard, Multicall
         returns (uint256 payoutToRecipient, uint256 feeToFiller)
     {
         feeToFiller = PricingLib.fee(
-            order.outputAmount, order.startTime, order.expectedDeliveryTime, fillTime, order.discountRate, maxFeeRate
+            order.outputAmount,
+            order.startTime,
+            order.expectedDeliveryTime,
+            fillTime,
+            order.discountRate,
+            maxFeeRate,
+            order.baseFee
         );
         payoutToRecipient = order.outputAmount - feeToFiller;
     }

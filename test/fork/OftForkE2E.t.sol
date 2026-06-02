@@ -188,7 +188,8 @@ contract OftForkE2ETest is ForkBase {
             nonce: 0,
             startTime: uint64(block.timestamp),
             expectedDeliveryTime: uint64(block.timestamp) + WINDOW,
-            discountRate: 1e13
+            discountRate: 1e13,
+            baseFee: 0
         });
     }
 

@@ -51,13 +51,21 @@ contract PermitForkTest is ForkBase {
         bytes memory sig = _signOrder(userKey, recipient, exp);
 
         // A relayer (not the user) submits the signed intent.
-        vm.prank(relayer);
-        (bytes32 orderId,) = adapter.initiateCCTPFor(
-            BASE_CHAIN, recipient, AMOUNT, 0, 2000, exp, RATE, user, PermitLib.Permit2Data(0, exp, sig)
-        );
+        bytes32 orderId = _submitFor(recipient, user, exp, sig);
 
         assertEq(IERC20P(usdc).balanceOf(user), 0, "USDC pulled from the signer and burned");
         assertEq(orderId, _expectedOrderId(user, recipient, exp), "order built from the signer's exact intent");
+    }
+
+    /// @dev The sponsored submit, in its own frame (keeps the test stack shallow under via_ir=false).
+    function _submitFor(bytes32 recipient, address user, uint64 exp, bytes memory sig)
+        internal
+        returns (bytes32 orderId)
+    {
+        vm.prank(relayer);
+        (orderId,) = adapter.initiateCCTPFor(
+            BASE_CHAIN, recipient, AMOUNT, 0, 2000, WINDOW, RATE, 0, user, PermitLib.Permit2Data(0, exp, sig)
+        );
     }
 
     function test_fork_sponsoredInitiate_tamperedOrder_rejected() external {
@@ -74,7 +82,27 @@ contract PermitForkTest is ForkBase {
         vm.prank(relayer);
         vm.expectRevert(); // Permit2 recovers a different signer for the tampered witness -> InvalidSigner
         adapter.initiateCCTPFor(
-            BASE_CHAIN, attackerRecipient, AMOUNT, 0, 2000, exp, RATE, user, PermitLib.Permit2Data(0, exp, sig)
+            BASE_CHAIN, attackerRecipient, AMOUNT, 0, 2000, WINDOW, RATE, 0, user, PermitLib.Permit2Data(0, exp, sig)
+        );
+    }
+
+    function test_fork_sponsoredInitiate_tamperedBridgeMode_rejected() external {
+        if (!_forkMainnetOrSkip()) return;
+        adapter = new CctpAdapter(address(new FastFillConfig()), address(this), 5e15);
+
+        (address user, uint256 userKey) = makeAddrAndKey("intentSigner");
+        _fund(user);
+        uint64 exp = uint64(block.timestamp) + WINDOW;
+        bytes32 recipient = makeAddr("recipient").toBytes32();
+        // The user signs for the FINALIZED mode (minFinalityThreshold = 2000), bound via bridgeParams.
+        bytes memory sig = _signOrder(userKey, recipient, exp);
+
+        // The relayer submits the SAME order but flips the bridge speed to fast (1000): bridgeParams
+        // differ, so Permit2 recovers a different signer for the tampered witness and reverts.
+        vm.prank(relayer);
+        vm.expectRevert();
+        adapter.initiateCCTPFor(
+            BASE_CHAIN, recipient, AMOUNT, 0, 1000, WINDOW, RATE, 0, user, PermitLib.Permit2Data(0, exp, sig)
         );
     }
 
@@ -86,7 +114,19 @@ contract PermitForkTest is ForkBase {
     }
 
     function _signOrder(uint256 userKey, bytes32 recipient, uint64 exp) internal view returns (bytes memory) {
-        bytes32 witness = PermitLib.orderWitness(OrderLib.BRIDGE_CCTP, BASE_CHAIN, recipient, AMOUNT, AMOUNT, exp, RATE);
+        // Timing is signed as the relative WINDOW; the bridge mode (maxFee = 0, minFinalityThreshold =
+        // 2000) is bound via bridgeParams; baseFee = 0. `exp` is reused only as the permit deadline.
+        bytes32 witness = PermitLib.orderWitness(
+            OrderLib.BRIDGE_CCTP,
+            BASE_CHAIN,
+            recipient,
+            AMOUNT,
+            AMOUNT,
+            WINDOW,
+            RATE,
+            0,
+            keccak256(abi.encode(uint256(0), uint32(2000)))
+        );
         return _signPermit2(userKey, exp, witness);
     }
 
@@ -105,7 +145,8 @@ contract PermitForkTest is ForkBase {
                 nonce: 0,
                 startTime: uint64(block.timestamp),
                 expectedDeliveryTime: exp,
-                discountRate: RATE
+                discountRate: RATE,
+                baseFee: 0
             })
         );
     }
