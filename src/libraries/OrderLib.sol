@@ -23,8 +23,9 @@ struct Order {
     uint256 outputAmount; // deterministic worst-case arriving amount the filler is owed
     uint64 nonce; // per-source-adapter monotonic counter -> global uniqueness
     uint64 startTime; // absolute timestamp (source) — pricing baseline
-    uint64 expectedDeliveryTime; // absolute timestamp — fee decays to 0 at/after this point
-    uint256 discountRate; // WAD per second — user-chosen premium rate
+    uint64 expectedDeliveryTime; // absolute timestamp — time premium decays to 0 at/after this point
+    uint256 discountRate; // WAD per second — user-chosen time-premium accrual rate
+    uint256 baseFee; // flat fee (output-token units) owed to the filler on any fill — additive, no decay
 }
 
 library OrderLib {

@@ -30,6 +30,14 @@ contract CctpAdapter is FastFillBase {
     /// @notice The immutable chain registry. Same address on every chain (CREATE2).
     IFastFillConfig public immutable config;
 
+    /// @notice CCTP v2 `minFinalityThreshold` presets the user picks to opt into a bridging speed.
+    ///         `<= FINALITY_FAST` makes the burn eligible for a fast (soft-finality) transfer, which
+    ///         charges up to `maxFee`; `FINALITY_FINALIZED` waits for hard finality (set `maxFee = 0`).
+    ///         The chosen value is the user's: in the self-submitted path it is their own tx, and in
+    ///         the sponsored path it is bound into the Permit2 witness so a relayer cannot change it.
+    uint32 public constant FINALITY_FAST = 1000;
+    uint32 public constant FINALITY_FINALIZED = 2000;
+
     error ReceiveMessageFailed();
     error MintRecipientMismatch(bytes32 mintRecipient);
     error UntrustedSourceDomain(uint32 sourceDomain);
@@ -66,21 +74,25 @@ contract CctpAdapter is FastFillBase {
     ///         via `multicall` for a single transaction).
     /// @param maxFee The max fast-transfer fee. `outputAmount = inputAmount - maxFee` is the
     ///               deterministic worst-case amount the filler is owed (feeExecuted <= maxFee).
-    /// @param minFinalityThreshold <= 1000 selects a fast (soft-finality) transfer.
+    /// @param minFinalityThreshold The bridging speed the user opts into (FINALITY_FAST / FINALITY_FINALIZED).
+    /// @param deliveryWindow Seconds until the time premium decays to 0; `expectedDeliveryTime` is
+    ///                       derived on-chain as `block.timestamp + deliveryWindow`.
+    /// @param discountRate Time-premium accrual per second (WAD); `baseFee` is a flat fee on any fill.
     function initiateCCTP(
         uint32 dstChainId,
         bytes32 recipient,
         uint256 inputAmount,
         uint256 maxFee,
         uint32 minFinalityThreshold,
-        uint64 expectedDeliveryTime,
-        uint256 discountRate
+        uint64 deliveryWindow,
+        uint256 discountRate,
+        uint256 baseFee
     ) external whenNotPaused returns (bytes32 orderId, uint64 nonce) {
         if (maxFee >= inputAmount) revert MaxFeeTooHigh(maxFee, inputAmount);
         SafeTransferLib.safeTransferFrom(config.chainConfig(block.chainid).usdc, msg.sender, address(this), inputAmount);
         nonce = _nextNonce();
         Order memory order = _buildOrder(
-            msg.sender, dstChainId, recipient, inputAmount, maxFee, expectedDeliveryTime, discountRate, nonce
+            msg.sender, dstChainId, recipient, inputAmount, maxFee, deliveryWindow, discountRate, baseFee, nonce
         );
         _assertCreatable(order);
         orderId = _finishInitiate(order, maxFee, minFinalityThreshold);
@@ -89,24 +101,29 @@ contract CctpAdapter is FastFillBase {
     /// @notice Sponsored initiate: a third party submits, but the USDC is pulled from `from` against
     ///         its Permit2 signature, and `from` is recorded as the order's sender. The signature
     ///         commits to `orderWitness(...)`, so the submitter cannot alter the recipient, amounts,
-    ///         timing, or rate `from` agreed to. This is the on-chain half of a signed bridge intent.
+    ///         timing, pricing, or bridge mode `from` agreed to — the `maxFee` + `minFinalityThreshold`
+    ///         the user opted into are bound via `bridgeParams`. This is the on-chain half of a signed
+    ///         bridge intent. `deliveryWindow` is relative, so the signed window holds regardless of
+    ///         when the relayer submits.
     function initiateCCTPFor(
         uint32 dstChainId,
         bytes32 recipient,
         uint256 inputAmount,
         uint256 maxFee,
         uint32 minFinalityThreshold,
-        uint64 expectedDeliveryTime,
+        uint64 deliveryWindow,
         uint256 discountRate,
+        uint256 baseFee,
         address from,
         PermitLib.Permit2Data calldata permit
     ) external whenNotPaused returns (bytes32 orderId, uint64 nonce) {
         if (maxFee >= inputAmount) revert MaxFeeTooHigh(maxFee, inputAmount);
         nonce = _nextNonce();
         Order memory order =
-            _buildOrder(from, dstChainId, recipient, inputAmount, maxFee, expectedDeliveryTime, discountRate, nonce);
+            _buildOrder(from, dstChainId, recipient, inputAmount, maxFee, deliveryWindow, discountRate, baseFee, nonce);
         _assertCreatable(order);
-        _pullOrderViaPermit2(order, from, permit); // pull AFTER building so the witness binds the order
+        // Pull AFTER building so the witness binds the order; bind the opted-into bridge mode too.
+        _pullOrderViaPermit2(order, from, permit, keccak256(abi.encode(maxFee, minFinalityThreshold)));
         orderId = _finishInitiate(order, maxFee, minFinalityThreshold);
     }
 
@@ -128,15 +145,18 @@ contract CctpAdapter is FastFillBase {
         );
     }
 
-    /// @dev Split out to keep each stack frame shallow (avoids stack-too-deep).
+    /// @dev Split out to keep each stack frame shallow (avoids stack-too-deep). Timing is derived
+    ///      fully on-chain: `startTime = block.timestamp`, `expectedDeliveryTime = startTime +
+    ///      deliveryWindow` (checked add reverts on overflow).
     function _buildOrder(
         address from,
         uint32 dstChainId,
         bytes32 recipient,
         uint256 inputAmount,
         uint256 maxFee,
-        uint64 expectedDeliveryTime,
+        uint64 deliveryWindow,
         uint256 discountRate,
+        uint256 baseFee,
         uint64 nonce
     ) private view returns (Order memory order) {
         address inUsdc = config.chainConfig(block.chainid).usdc;
@@ -155,8 +175,9 @@ contract CctpAdapter is FastFillBase {
             outputAmount: inputAmount - maxFee,
             nonce: nonce,
             startTime: uint64(block.timestamp),
-            expectedDeliveryTime: expectedDeliveryTime,
-            discountRate: discountRate
+            expectedDeliveryTime: uint64(block.timestamp) + deliveryWindow,
+            discountRate: discountRate,
+            baseFee: baseFee
         });
     }
 

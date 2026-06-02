@@ -26,15 +26,21 @@ contract CctpLifecycleTest is Fixtures {
     // ---------------------------------------------------------------------------------------------
 
     function _createOrder() internal returns (Order memory order, bytes32 orderId) {
+        return _createOrderWithBase(0);
+    }
+
+    /// @dev `deliveryWindow` is now relative — the adapter derives `expectedDeliveryTime` on-chain as
+    ///      `block.timestamp + WINDOW`, which equals `start + WINDOW` here (same block as `start`).
+    function _createOrderWithBase(uint256 baseFee) internal returns (Order memory order, bytes32 orderId) {
         uint64 start = uint64(block.timestamp);
         usdc.mint(user, INPUT);
         vm.chainId(SRC_CHAIN);
         vm.startPrank(user);
         usdc.approve(address(srcCctp), INPUT);
         uint64 nonce;
-        (orderId, nonce) = srcCctp.initiateCCTP(DST_CHAIN, _b32(recipient), INPUT, MAX_FEE, 1000, start + WINDOW, RATE);
+        (orderId, nonce) = srcCctp.initiateCCTP(DST_CHAIN, _b32(recipient), INPUT, MAX_FEE, 1000, WINDOW, RATE, baseFee);
         vm.stopPrank();
-        order = _cctpOrder(INPUT, MAX_FEE, start, start + WINDOW, RATE, nonce);
+        order = _cctpOrder(INPUT, MAX_FEE, start, start + WINDOW, RATE, baseFee, nonce);
     }
 
     function _fillAt(Order memory order, address filler, uint256 fillTime) internal returns (uint256 payout) {
@@ -79,7 +85,7 @@ contract CctpLifecycleTest is Fixtures {
         uint256 payout = _fillAt(order, relayer, fillTime);
 
         uint256 expFee = PricingLib.fee(
-            order.outputAmount, order.startTime, order.expectedDeliveryTime, fillTime, RATE, MAX_FEE_RATE
+            order.outputAmount, order.startTime, order.expectedDeliveryTime, fillTime, RATE, MAX_FEE_RATE, order.baseFee
         );
         assertEq(payout, order.outputAmount - expFee, "payout");
         assertGt(expFee, 0, "fee charged");
@@ -107,7 +113,7 @@ contract CctpLifecycleTest is Fixtures {
         assertEq(uint8(dstCctp.getOrder(orderId).status), uint8(FillStatus.Settled), "settled");
         // The relayer's realized profit is exactly the fill fee it charged (owed - what it paid out).
         uint256 expFee = PricingLib.fee(
-            order.outputAmount, order.startTime, order.expectedDeliveryTime, fillTime, RATE, MAX_FEE_RATE
+            order.outputAmount, order.startTime, order.expectedDeliveryTime, fillTime, RATE, MAX_FEE_RATE, order.baseFee
         );
         assertEq(owed - payout, expFee, "relayer profit == fill fee");
     }
@@ -121,6 +127,37 @@ contract CctpLifecycleTest is Fixtures {
         assertEq(usdc.balanceOf(recipient), arrived, "recipient gets all");
         assertEq(usdc.balanceOf(relayer), 0, "no filler");
         assertEq(uint8(dstCctp.getOrder(orderId).status), uint8(FillStatus.Settled), "settled");
+    }
+
+    function test_baseFee_flatPremiumAppliedAndReimbursed() public {
+        uint256 baseFee = 5e5; // $0.50 flat, additive to the time premium
+        (Order memory order,) = _createOrderWithBase(baseFee);
+        uint256 fillTime = order.startTime + 20;
+        uint256 payout = _fillAt(order, relayer, fillTime);
+
+        uint256 expFee = PricingLib.fee(
+            order.outputAmount, order.startTime, order.expectedDeliveryTime, fillTime, RATE, MAX_FEE_RATE, baseFee
+        );
+        assertGe(expFee, baseFee, "fee includes at least the flat base");
+        assertEq(payout, order.outputAmount - expFee, "payout reduced by base + time fee");
+        assertEq(usdc.balanceOf(recipient), payout, "recipient paid the discounted payout");
+
+        // Settle still reimburses the filler exactly outputAmount; surplus goes to the recipient.
+        _settle(order, 4e5, 30);
+        uint256 surplus = (INPUT - 4e5) - order.outputAmount;
+        assertEq(usdc.balanceOf(relayer), order.outputAmount, "filler reimbursed outputAmount");
+        assertEq(usdc.balanceOf(recipient), payout + surplus, "recipient: payout + surplus");
+    }
+
+    function test_initiate_baseFeeTooHigh_reverts() public {
+        usdc.mint(user, INPUT);
+        vm.chainId(SRC_CHAIN);
+        vm.startPrank(user);
+        usdc.approve(address(srcCctp), INPUT);
+        // baseFee >= outputAmount (INPUT - MAX_FEE) leaves the recipient nothing at fill -> rejected.
+        vm.expectRevert(abi.encodeWithSelector(FastFillBase.InvalidBaseFee.selector, INPUT - MAX_FEE, INPUT - MAX_FEE));
+        srcCctp.initiateCCTP(DST_CHAIN, _b32(recipient), INPUT, MAX_FEE, 1000, WINDOW, RATE, INPUT - MAX_FEE);
+        vm.stopPrank();
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -190,7 +227,7 @@ contract CctpLifecycleTest is Fixtures {
         // An order never created on the source: the filler pays the recipient from its own funds
         // and is never reimbursed because no matching message will ever arrive.
         Order memory fake =
-            _cctpOrder(500e6, MAX_FEE, uint64(block.timestamp), uint64(block.timestamp) + WINDOW, RATE, 999);
+            _cctpOrder(500e6, MAX_FEE, uint64(block.timestamp), uint64(block.timestamp) + WINDOW, RATE, 0, 999);
         bytes32 fakeId = OrderLib.hash(fake);
 
         uint256 payout = _fillAt(fake, relayer, fake.startTime + 10);

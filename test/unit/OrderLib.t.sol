@@ -19,7 +19,8 @@ contract OrderLibTest is Test {
             nonce: 7,
             startTime: 1_000_000,
             expectedDeliveryTime: 1_000_100,
-            discountRate: 1e13
+            discountRate: 1e13,
+            baseFee: 5e5
         });
     }
 
@@ -61,5 +62,9 @@ contract OrderLibTest is Test {
         Order memory f = _sample();
         f.dstChainId = 3;
         assertTrue(OrderLib.hash(f) != id, "dstChainId");
+
+        Order memory g = _sample();
+        g.baseFee += 1;
+        assertTrue(OrderLib.hash(g) != id, "baseFee");
     }
 }
