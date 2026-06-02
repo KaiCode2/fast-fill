@@ -24,4 +24,8 @@ interface ITokenMessengerV2 {
         uint32 minFinalityThreshold,
         bytes calldata hookData
     ) external;
+
+    /// @notice The MessageTransmitter this TokenMessenger dispatches through. Read by the adapter so
+    ///         the transmitter address never has to be configured separately.
+    function localMessageTransmitter() external view returns (address);
 }

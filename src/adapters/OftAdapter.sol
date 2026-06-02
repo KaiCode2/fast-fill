@@ -7,49 +7,39 @@ import {FastFillBase} from "../FastFillBase.sol";
 import {Order, OrderLib} from "../libraries/OrderLib.sol";
 import {AddressCast} from "../libraries/AddressCast.sol";
 import {OFTComposeMsgCodec} from "../libraries/OFTComposeMsgCodec.sol";
+import {PermitLib} from "../libraries/PermitLib.sol";
 import {ILayerZeroComposer} from "../interfaces/layerzero/ILayerZeroComposer.sol";
+import {ILayerZeroEndpointV2} from "../interfaces/layerzero/ILayerZeroEndpointV2.sol";
 import {IOFT, SendParam, MessagingFee} from "../interfaces/layerzero/IOFT.sol";
+import {IFastFillConfig, ChainConfig} from "../interfaces/IFastFillConfig.sol";
 
 /// @title  OftAdapter
-/// @notice Fast-fill adapter for a LayerZero v2 OFT. Bidirectional: `initiateOFT` starts an
+/// @notice Fast-fill adapter for a LayerZero v2 OFT (USD₮0). Bidirectional: `initiateOFT` starts an
 ///         outbound transfer; `lzCompose` finalizes an inbound one.
 ///
-///         On the destination, the OFT credits the bridged tokens to this contract during
-///         `_lzReceive`, then the Endpoint invokes `lzCompose` with the order payload. Three gates
-///         authenticate it: caller is the Endpoint, the local `from` OFT is ours, and the embedded
-///         `composeFrom` is our registered source adapter. This is the OFT analogue of CCTP's
-///         destinationCaller + messageSender checks.
-///
-///         Note: this is distinct from LayerZero's lockbox `OFTAdapter`; here `oft` is a configured
-///         OFT instance that this contract uses to send/receive a single token.
+///         All chain-specific data (the OFT, its token, the LZ eid) is resolved at call time from
+///         the immutable `config` registry keyed by `block.chainid` — the endpoint and token are in
+///         turn read live from the OFT and cross-checked against the registry. The contract holds no
+///         per-chain configuration and deploys to one CREATE2 address on every chain, so the
+///         counterpart is always `address(this)`: `lzCompose` requires `composeFrom == address(this)`.
 contract OftAdapter is FastFillBase, ILayerZeroComposer {
     using OrderLib for Order;
     using AddressCast for bytes32;
     using AddressCast for address;
 
-    address public immutable endpoint;
-    IOFT public immutable oft;
-    address public immutable oftToken;
-
-    /// @dev chainId <-> LayerZero endpoint id. LZ eids are never 0, so eid==0 means "unconfigured".
-    mapping(uint32 chainId => uint32 eid) public chainIdToEid;
-    mapping(uint32 eid => uint32 chainId) public eidToChainId;
+    /// @notice The immutable chain registry. Same address on every chain (CREATE2).
+    IFastFillConfig public immutable config;
 
     error NotEndpoint(address caller);
     error UntrustedLocalOFT(address from);
     error UntrustedPeer(bytes32 composeFrom);
-    error UnknownEid(uint32 chainId);
     error UntrustedSourceEid(uint32 srcEid);
     error WrongOutputToken(bytes32 outputToken);
+    error TokenMismatch(address onchain, address configured);
+    error EidMismatch(uint32 configured, uint32 onchain);
 
-    event EidConfigured(uint32 indexed chainId, uint32 indexed eid);
-
-    constructor(address owner_, uint256 maxFeeRate_, address endpoint_, address oft_)
-        FastFillBase(owner_, maxFeeRate_)
-    {
-        endpoint = endpoint_;
-        oft = IOFT(oft_);
-        oftToken = IOFT(oft_).token();
+    constructor(address config_, address owner_, uint256 maxFeeRate_) FastFillBase(owner_, maxFeeRate_) {
+        config = IFastFillConfig(config_);
     }
 
     function _bridgeType() internal pure override returns (uint8) {
@@ -57,8 +47,14 @@ contract OftAdapter is FastFillBase, ILayerZeroComposer {
     }
 
     function _resolveOutputToken(Order memory order) internal view override returns (address) {
-        if (order.outputToken != oftToken.toBytes32()) revert WrongOutputToken(order.outputToken);
-        return oftToken;
+        address local = config.chainConfig(block.chainid).usdt0Token;
+        if (order.outputToken != local.toBytes32()) revert WrongOutputToken(order.outputToken);
+        return local;
+    }
+
+    function _requireSupportedRemote(uint32 chainId) internal view override {
+        ChainConfig memory c = config.chainConfig(chainId);
+        if (!c.supported || c.usdt0Oft == address(0) || c.usdt0Token == address(0)) revert UnsupportedChain(chainId);
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -66,6 +62,7 @@ contract OftAdapter is FastFillBase, ILayerZeroComposer {
     // ---------------------------------------------------------------------------------------------
 
     /// @notice Send the OFT token to `dstChainId` and create an optimistically-fillable order.
+    ///         `msg.sender` is the user and the payer (approve this adapter for the token).
     /// @dev `msg.value` pays the LayerZero native messaging fee (size it off-chain via quoteSend).
     ///      `extraOptions` must include a compose-gas allowance (OptionsBuilder.addExecutorLzComposeOption).
     /// @param minAmountLD The slippage floor, used as the deterministic `outputAmount` the filler is owed.
@@ -78,24 +75,59 @@ contract OftAdapter is FastFillBase, ILayerZeroComposer {
         uint64 expectedDeliveryTime,
         uint256 discountRate
     ) external payable whenNotPaused returns (bytes32 orderId, uint64 nonce) {
-        uint32 dstEid = chainIdToEid[dstChainId];
-        if (eidToChainId[dstEid] != dstChainId) revert UnknownEid(dstChainId);
-
+        SafeTransferLib.safeTransferFrom(
+            config.chainConfig(block.chainid).usdt0Token, msg.sender, address(this), inputAmount
+        );
         nonce = _nextNonce();
-        Order memory order =
-            _buildOrder(dstChainId, recipient, inputAmount, minAmountLD, expectedDeliveryTime, discountRate, nonce);
+        Order memory order = _buildOrder(
+            msg.sender, dstChainId, recipient, inputAmount, minAmountLD, expectedDeliveryTime, discountRate, nonce
+        );
         _assertCreatable(order);
+        orderId = _finishInitiate(order, extraOptions);
+    }
+
+    /// @notice Sponsored initiate: a third party submits and pays the LayerZero fee (`msg.value`),
+    ///         while the token is pulled from `from` against its Permit2 signature and `from` is
+    ///         recorded as the order's sender. The signature commits to `orderWitness(...)`, so the
+    ///         submitter cannot alter what `from` agreed to — the on-chain half of a signed intent.
+    function initiateOFTFor(
+        uint32 dstChainId,
+        bytes32 recipient,
+        uint256 inputAmount,
+        uint256 minAmountLD,
+        bytes calldata extraOptions,
+        uint64 expectedDeliveryTime,
+        uint256 discountRate,
+        address from,
+        PermitLib.Permit2Data calldata permit
+    ) external payable whenNotPaused returns (bytes32 orderId, uint64 nonce) {
+        nonce = _nextNonce();
+        Order memory order = _buildOrder(
+            from, dstChainId, recipient, inputAmount, minAmountLD, expectedDeliveryTime, discountRate, nonce
+        );
+        _assertCreatable(order);
+        _pullOrderViaPermit2(order, from, permit); // pull AFTER building so the witness binds the order
+        orderId = _finishInitiate(order, extraOptions);
+    }
+
+    /// @dev Hash, send, and emit, once the order is built and the token is held by this adapter.
+    function _finishInitiate(Order memory order, bytes calldata extraOptions) private returns (bytes32 orderId) {
         orderId = order.hash();
-
-        _pullAndSend(order, dstEid, extraOptions);
-
+        _dispatchSend(order, extraOptions);
         emit OrderCreated(
-            orderId, OrderLib.BRIDGE_OFT, msg.sender, dstChainId, oftToken.toBytes32(), minAmountLD, nonce
+            orderId,
+            OrderLib.BRIDGE_OFT,
+            order.sender.toAddress(),
+            order.dstChainId,
+            order.outputToken,
+            order.outputAmount,
+            order.nonce
         );
     }
 
-    /// @dev Split out of `initiateOFT` to keep each stack frame shallow (avoids stack-too-deep).
+    /// @dev Split out to keep each stack frame shallow (avoids stack-too-deep).
     function _buildOrder(
+        address from,
         uint32 dstChainId,
         bytes32 recipient,
         uint256 inputAmount,
@@ -104,14 +136,18 @@ contract OftAdapter is FastFillBase, ILayerZeroComposer {
         uint256 discountRate,
         uint64 nonce
     ) private view returns (Order memory order) {
+        address inToken = config.chainConfig(block.chainid).usdt0Token;
+        address outToken = config.chainConfig(dstChainId).usdt0Token;
+        if (inToken == address(0)) revert UnsupportedChain(uint32(block.chainid));
+        if (outToken == address(0)) revert UnsupportedChain(dstChainId);
         order = Order({
             bridgeType: OrderLib.BRIDGE_OFT,
             srcChainId: uint32(block.chainid),
             dstChainId: dstChainId,
-            sender: msg.sender.toBytes32(),
+            sender: from.toBytes32(),
             recipient: recipient,
-            inputToken: oftToken.toBytes32(),
-            outputToken: oftToken.toBytes32(),
+            inputToken: inToken.toBytes32(),
+            outputToken: outToken.toBytes32(),
             inputAmount: inputAmount,
             outputAmount: minAmountLD,
             nonce: nonce,
@@ -121,21 +157,30 @@ contract OftAdapter is FastFillBase, ILayerZeroComposer {
         });
     }
 
-    /// @dev Pull the token from the user, approve the OFT, and dispatch the cross-chain send.
-    function _pullAndSend(Order memory order, uint32 dstEid, bytes calldata extraOptions) private {
-        SafeTransferLib.safeTransferFrom(oftToken, msg.sender, address(this), order.inputAmount);
-        SafeTransferLib.safeApproveWithRetry(oftToken, address(oft), order.inputAmount);
+    /// @dev Approve the OFT and dispatch the cross-chain send to ourselves on dst. The token is
+    ///      already held by this adapter (pulled by the entrypoint).
+    function _dispatchSend(Order memory order, bytes calldata extraOptions) private {
+        ChainConfig memory lc = config.chainConfig(block.chainid);
+        IOFT oftLocal = IOFT(lc.usdt0Oft);
+
+        // "No room to screw up": the live OFT's token + endpoint eid must match the registry.
+        address inToken = oftLocal.token();
+        if (inToken != lc.usdt0Token) revert TokenMismatch(inToken, lc.usdt0Token);
+        uint32 onchainEid = ILayerZeroEndpointV2(oftLocal.endpoint()).eid();
+        if (onchainEid != lc.lzEid) revert EidMismatch(lc.lzEid, onchainEid);
+
+        SafeTransferLib.safeApproveWithRetry(inToken, address(oftLocal), order.inputAmount);
 
         SendParam memory sendParam = SendParam({
-            dstEid: dstEid,
-            to: remoteAdapter[order.dstChainId],
+            dstEid: config.chainConfig(order.dstChainId).lzEid,
+            to: address(this).toBytes32(), // our adapter on the dst chain (same address)
             amountLD: order.inputAmount,
             minAmountLD: order.outputAmount,
             extraOptions: extraOptions,
             composeMsg: OrderLib.encode(order),
             oftCmd: ""
         });
-        oft.send{value: msg.value}(sendParam, MessagingFee({nativeFee: msg.value, lzTokenFee: 0}), msg.sender);
+        oftLocal.send{value: msg.value}(sendParam, MessagingFee({nativeFee: msg.value, lzTokenFee: 0}), msg.sender);
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -149,31 +194,24 @@ contract OftAdapter is FastFillBase, ILayerZeroComposer {
         nonReentrant
         whenNotPaused
     {
-        if (msg.sender != endpoint) revert NotEndpoint(msg.sender);
-        if (from != address(oft)) revert UntrustedLocalOFT(from);
+        address oftAddr = config.chainConfig(block.chainid).usdt0Oft;
+        if (oftAddr == address(0)) revert UnsupportedChain(uint32(block.chainid));
+        if (msg.sender != IOFT(oftAddr).endpoint()) revert NotEndpoint(msg.sender);
+        if (from != oftAddr) revert UntrustedLocalOFT(from);
 
         uint32 srcEid = OFTComposeMsgCodec.srcEid(message);
         bytes32 composeFrom = OFTComposeMsgCodec.composeFrom(message);
         uint256 arrived = OFTComposeMsgCodec.amountLD(message);
         Order memory order = OrderLib.decode(OFTComposeMsgCodec.composeMsg(message));
 
-        uint32 mappedSrc = eidToChainId[srcEid];
-        if (mappedSrc == 0 || mappedSrc != order.srcChainId) revert UntrustedSourceEid(srcEid);
-        if (composeFrom != remoteAdapter[order.srcChainId]) revert UntrustedPeer(composeFrom);
+        // The source eid must match the order's claimed source chain (per the registry)...
+        ChainConfig memory sc = config.chainConfig(order.srcChainId);
+        if (!sc.supported || sc.lzEid != srcEid) revert UntrustedSourceEid(srcEid);
+        // ...and the compose must originate from our adapter on that chain (same address).
+        if (composeFrom != address(this).toBytes32()) revert UntrustedPeer(composeFrom);
         if (block.chainid != order.dstChainId) revert WrongDestinationChain(order.dstChainId);
 
         // The OFT already credited `arrived` tokens to this contract during _lzReceive.
         _settle(order, order.hash(), arrived);
-    }
-
-    // ---------------------------------------------------------------------------------------------
-    // Admin
-    // ---------------------------------------------------------------------------------------------
-
-    /// @notice Configure the chainId <-> LayerZero eid mapping in both directions.
-    function setEid(uint32 chainId, uint32 eid) external onlyOwner {
-        chainIdToEid[chainId] = eid;
-        eidToChainId[eid] = chainId;
-        emit EidConfigured(chainId, eid);
     }
 }

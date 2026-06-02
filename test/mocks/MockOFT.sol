@@ -9,6 +9,9 @@ import {IOFT, SendParam, MessagingFee, MessagingReceipt, OFTReceipt} from "../..
 ///         by the test (credit the destination via `mint`, then MockLzEndpoint invokes lzCompose).
 ///         Inherits MockERC20 for `mint` and the optional blacklist (`setBlocked`).
 contract MockOFT is MockERC20, IOFT {
+    /// @dev The LZ endpoint this OFT reports (read by the adapter). Auto-getter satisfies IOFT.endpoint().
+    address public immutable endpoint;
+
     uint32 public lastDstEid;
     bytes32 public lastTo;
     uint256 public lastAmountLD;
@@ -18,7 +21,9 @@ contract MockOFT is MockERC20, IOFT {
 
     event Sent(uint32 dstEid, bytes32 to, uint256 amountLD, uint256 minAmountLD, bytes composeMsg);
 
-    constructor() MockERC20("Mock OFT", "mOFT", 18) {}
+    constructor(address endpoint_) MockERC20("Mock OFT", "mOFT", 18) {
+        endpoint = endpoint_;
+    }
 
     function token() external view returns (address) {
         return address(this);

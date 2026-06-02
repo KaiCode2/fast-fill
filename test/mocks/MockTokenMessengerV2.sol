@@ -9,6 +9,10 @@ import {ITokenMessengerV2} from "../../src/interfaces/cctp/ITokenMessengerV2.sol
 ///         locking the token in itself; the corresponding mint is driven separately by the test via
 ///         MockMessageTransmitterV2 (modelling the two chains in one EVM).
 contract MockTokenMessengerV2 is ITokenMessengerV2 {
+    /// @dev The MessageTransmitter this messenger reports (read by the adapter). Auto-getter
+    ///      satisfies ITokenMessengerV2.localMessageTransmitter().
+    address public immutable localMessageTransmitter;
+
     uint256 public lastAmount;
     uint32 public lastDestinationDomain;
     bytes32 public lastMintRecipient;
@@ -29,6 +33,10 @@ contract MockTokenMessengerV2 is ITokenMessengerV2 {
         uint32 minFinalityThreshold,
         bytes hookData
     );
+
+    constructor(address localMessageTransmitter_) {
+        localMessageTransmitter = localMessageTransmitter_;
+    }
 
     function depositForBurnWithHook(
         uint256 amount,

@@ -4,10 +4,14 @@ pragma solidity ^0.8.26;
 import {Ownable} from "solady/auth/Ownable.sol";
 import {ReentrancyGuard} from "solady/utils/ReentrancyGuard.sol";
 import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
+import {Multicallable} from "solady/utils/Multicallable.sol";
 
 import {IFastFill, FillStatus, OrderRecord} from "./interfaces/IFastFill.sol";
+import {IERC20Permit} from "./interfaces/IERC20Permit.sol";
+import {ISignatureTransfer} from "./interfaces/permit2/ISignatureTransfer.sol";
 import {Order, OrderLib} from "./libraries/OrderLib.sol";
 import {PricingLib} from "./libraries/PricingLib.sol";
+import {PermitLib} from "./libraries/PermitLib.sol";
 import {AddressCast} from "./libraries/AddressCast.sol";
 
 /// @title  FastFillBase
@@ -22,10 +26,14 @@ import {AddressCast} from "./libraries/AddressCast.sol";
 ///         never reimbursed. Fills are therefore trustless: a bad filler can only lose its own
 ///         funds. The destination contract's token balance is the reimbursement pool — there is no
 ///         separate escrow, and every order settles exactly once.
-abstract contract FastFillBase is IFastFill, Ownable, ReentrancyGuard {
+abstract contract FastFillBase is IFastFill, Ownable, ReentrancyGuard, Multicallable {
     using OrderLib for Order;
     using AddressCast for bytes32;
     using AddressCast for address;
+
+    /// @notice Uniswap Permit2 — same address on every chain — used for signature-based pulls where
+    ///         the funds come from a signer that is not `msg.sender` (sponsored / intent flows).
+    address public constant PERMIT2 = 0x000000000022D473030F116dDEE9F6B43aC78BA3;
 
     // ---------------------------------------------------------------------------------------------
     // Errors
@@ -35,12 +43,11 @@ abstract contract FastFillBase is IFastFill, Ownable, ReentrancyGuard {
     error WrongDestinationChain(uint32 expected);
     error OrderAlreadyActive(bytes32 orderId);
     error AlreadySettled(bytes32 orderId);
-    error FillerNotAllowed(address filler);
     error NothingToClaim();
     error InvalidMaxFeeRate(uint256 maxFeeRate);
     error InvalidWindow(uint64 startTime, uint64 expectedDeliveryTime);
     error InvalidOutputAmount(uint256 outputAmount, uint256 inputAmount);
-    error UnknownRemoteAdapter(uint32 chainId);
+    error UnsupportedChain(uint32 chainId);
     error NotSourceChain(uint32 srcChainId);
     error ZeroRecipient();
 
@@ -54,13 +61,6 @@ abstract contract FastFillBase is IFastFill, Ownable, ReentrancyGuard {
     /// @notice Funds that failed to push (e.g. reverting/blacklisted recipient), claimable later.
     mapping(address account => mapping(address token => uint256)) internal _claimable;
 
-    /// @notice The fast-fill adapter address on each remote chain (bytes32 to allow non-EVM later).
-    ///         Used as the CCTP mintRecipient/destinationCaller, the OFT `to`, and the OFT peer.
-    mapping(uint32 chainId => bytes32 adapter) public remoteAdapter;
-
-    /// @notice Allowlisted fillers (only consulted when `fillAllowlistEnabled`).
-    mapping(address filler => bool) public allowedFiller;
-
     /// @notice Per-adapter governance cap on the fee rate, WAD (<= 1e18).
     uint256 public maxFeeRate;
 
@@ -69,9 +69,6 @@ abstract contract FastFillBase is IFastFill, Ownable, ReentrancyGuard {
 
     /// @notice When true, initiate/fill/settle are blocked (claim is never blocked).
     bool public paused;
-
-    /// @notice When true, only allowlisted addresses may call `fill` (default false).
-    bool public fillAllowlistEnabled;
 
     // ---------------------------------------------------------------------------------------------
     // Construction
@@ -98,24 +95,70 @@ abstract contract FastFillBase is IFastFill, Ownable, ReentrancyGuard {
     ///      its ERC20 address. Reverts on mismatch. Used by both `fill` and `_settle`.
     function _resolveOutputToken(Order memory order) internal view virtual returns (address token);
 
+    /// @dev Revert unless `chainId` is a supported counterpart for this bridge (per the config
+    ///      registry). This is the "does the remote chain exist" check that replaces the old
+    ///      remote-adapter registry now that the counterpart is always `address(this)`.
+    function _requireSupportedRemote(uint32 chainId) internal view virtual;
+
     // ---------------------------------------------------------------------------------------------
     // Optimistic fill (destination, before the bridge message arrives)
     // ---------------------------------------------------------------------------------------------
 
     /// @inheritdoc IFastFill
+    /// @dev `msg.sender` is the filler and the payer; it must have approved this adapter for the
+    ///      payout (or batch a `selfPermit` via `multicall` for a single transaction).
     function fill(Order calldata order) external nonReentrant whenNotPaused returns (bytes32 orderId) {
+        address token;
+        address recipient;
+        uint256 payout;
+        uint256 fee;
+        (orderId, token, recipient, payout, fee) = _prepareFill(order, msg.sender);
+        SafeTransferLib.safeTransferFrom(token, msg.sender, address(this), payout);
+        _payout(orderId, token, recipient, payout);
+        emit OrderFilled(orderId, msg.sender, payout, fee, uint40(block.timestamp));
+    }
+
+    /// @notice Fill `order` on behalf of `filler`, pulling the payout from `filler` via a Permit2
+    ///         signature. Lets a third party submit the fill while the funds and the recorded filler
+    ///         are `filler` — the filler signs once, off-chain, and need not send the transaction.
+    /// @dev The Permit2 signature commits to `fillWitness(orderId)`, so a submitter can only fill the
+    ///      exact order the filler authorized; the signed `permitted.amount` must be `order.outputAmount`
+    ///      (the worst-case payout), of which only the actual `payout` is pulled.
+    function fillFor(Order calldata order, address filler, PermitLib.Permit2Data calldata permit)
+        external
+        nonReentrant
+        whenNotPaused
+        returns (bytes32 orderId)
+    {
+        address token;
+        address recipient;
+        uint256 payout;
+        uint256 fee;
+        (orderId, token, recipient, payout, fee) = _prepareFill(order, filler);
+        // The filler signed `permitted.amount == order.outputAmount` (worst-case) for this orderId;
+        // pull only the actual payout.
+        _pullFillViaPermit2(orderId, token, filler, order.outputAmount, payout, permit);
+        _payout(orderId, token, recipient, payout);
+        emit OrderFilled(orderId, filler, payout, fee, uint40(block.timestamp));
+    }
+
+    /// @dev Shared fill bookkeeping: validate, price, and record `filler` as the filler. Pulling the
+    ///      payout and forwarding it to the recipient is left to the caller (it differs by funding
+    ///      source). Effects are written before the caller's interactions (checks-effects-interactions).
+    function _prepareFill(Order calldata order, address filler)
+        internal
+        returns (bytes32 orderId, address token, address recipient, uint256 payout, uint256 fee)
+    {
         if (order.bridgeType != _bridgeType()) revert WrongBridgeType(_bridgeType(), order.bridgeType);
         if (block.chainid != order.dstChainId) revert WrongDestinationChain(order.dstChainId);
-        if (fillAllowlistEnabled && !allowedFiller[msg.sender]) revert FillerNotAllowed(msg.sender);
 
         orderId = order.hash();
         OrderRecord storage rec = _orders[orderId];
         if (rec.status != FillStatus.None) revert OrderAlreadyActive(orderId);
 
-        address token = _resolveOutputToken(order);
-        address recipient = order.recipient.toAddress();
-
-        uint256 feeToFiller = PricingLib.fee(
+        token = _resolveOutputToken(order);
+        recipient = order.recipient.toAddress();
+        fee = PricingLib.fee(
             order.outputAmount,
             order.startTime,
             order.expectedDeliveryTime,
@@ -123,19 +166,11 @@ abstract contract FastFillBase is IFastFill, Ownable, ReentrancyGuard {
             order.discountRate,
             maxFeeRate
         );
-        uint256 payoutToRecipient = order.outputAmount - feeToFiller;
+        payout = order.outputAmount - fee;
 
-        // Effects before interactions.
-        rec.filler = msg.sender;
+        rec.filler = filler;
         rec.status = FillStatus.Filled;
         rec.fillTime = uint40(block.timestamp);
-
-        // Pull the payout from the relayer into the contract, then forward to the recipient with a
-        // pull-payment fallback so a temporarily-reverting recipient can't brick the fill.
-        SafeTransferLib.safeTransferFrom(token, msg.sender, address(this), payoutToRecipient);
-        _payout(orderId, token, recipient, payoutToRecipient);
-
-        emit OrderFilled(orderId, msg.sender, payoutToRecipient, feeToFiller, uint40(block.timestamp));
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -198,6 +233,94 @@ abstract contract FastFillBase is IFastFill, Ownable, ReentrancyGuard {
     }
 
     // ---------------------------------------------------------------------------------------------
+    // Gasless approvals (ERC-2612 self-permit + Permit2 signature pulls)
+    // ---------------------------------------------------------------------------------------------
+
+    /// @notice Apply an EIP-2612 permit for `token` from `msg.sender` to this adapter, so an approval
+    ///         and an action can land in one transaction: `multicall([selfPermit(...), fill/initiate(...)])`
+    ///         (`multicall` preserves `msg.sender`). Best-effort — a front-run that already set the
+    ///         allowance does not brick the batch; an insufficient allowance still reverts the action.
+    function selfPermit(address token, uint256 value, uint256 deadline, uint8 v, bytes32 r, bytes32 s) external {
+        try IERC20Permit(token).permit(msg.sender, address(this), value, deadline, v, r, s) {} catch {}
+    }
+
+    /// @dev Pull `order.inputAmount` of the order's input token from `from` via Permit2, binding the
+    ///      signature to the order intent so a sponsor cannot alter it. Used by `initiate*For`.
+    function _pullOrderViaPermit2(Order memory order, address from, PermitLib.Permit2Data calldata permit) internal {
+        bytes32 witness = PermitLib.orderWitness(
+            order.bridgeType,
+            order.dstChainId,
+            order.recipient,
+            order.inputAmount,
+            order.outputAmount,
+            order.expectedDeliveryTime,
+            order.discountRate
+        );
+        _pullViaPermit2(
+            order.inputToken.toAddress(),
+            from,
+            order.inputAmount,
+            order.inputAmount,
+            permit.nonce,
+            permit.deadline,
+            witness,
+            PermitLib.ORDER_WITNESS_TYPE_STRING,
+            permit.signature
+        );
+    }
+
+    /// @dev Pull `requestedAmount` from `filler` via Permit2, binding the signature to `orderId`.
+    function _pullFillViaPermit2(
+        bytes32 orderId,
+        address token,
+        address filler,
+        uint256 maxAmount,
+        uint256 requestedAmount,
+        PermitLib.Permit2Data calldata permit
+    ) internal {
+        _pullViaPermit2(
+            token,
+            filler,
+            maxAmount,
+            requestedAmount,
+            permit.nonce,
+            permit.deadline,
+            PermitLib.fillWitness(orderId),
+            PermitLib.FILL_WITNESS_TYPE_STRING,
+            permit.signature
+        );
+    }
+
+    /// @dev Pull `requestedAmount` of `token` from `owner` to this adapter via Permit2, against a
+    ///      signature that also commits to `witness` (the order intent / fill authorization). This is
+    ///      how a sponsor funds an action from a signer that is not `msg.sender`.
+    function _pullViaPermit2(
+        address token,
+        address owner,
+        uint256 maxAmount,
+        uint256 requestedAmount,
+        uint256 nonce,
+        uint256 deadline,
+        bytes32 witness,
+        string memory witnessTypeString,
+        bytes calldata signature
+    ) internal {
+        ISignatureTransfer(PERMIT2)
+            .permitWitnessTransferFrom(
+                ISignatureTransfer.PermitTransferFrom({
+                permitted: ISignatureTransfer.TokenPermissions({token: token, amount: maxAmount}),
+                nonce: nonce,
+                deadline: deadline
+            }),
+                ISignatureTransfer.SignatureTransferDetails({to: address(this), requestedAmount: requestedAmount}),
+                owner,
+                witness,
+                witnessTypeString,
+                signature
+            );
+    }
+
+    // ---------------------------------------------------------------------------------------------
     // Source-side helpers for adapters
     // ---------------------------------------------------------------------------------------------
 
@@ -210,7 +333,7 @@ abstract contract FastFillBase is IFastFill, Ownable, ReentrancyGuard {
     /// @dev Common create-time validation. Adapters add bridge-specific checks (token, domain/eid).
     function _assertCreatable(Order memory order) internal view {
         if (order.srcChainId != block.chainid) revert NotSourceChain(order.srcChainId);
-        if (remoteAdapter[order.dstChainId] == bytes32(0)) revert UnknownRemoteAdapter(order.dstChainId);
+        _requireSupportedRemote(order.dstChainId);
         if (order.expectedDeliveryTime <= order.startTime) {
             revert InvalidWindow(order.startTime, order.expectedDeliveryTime);
         }
@@ -250,10 +373,6 @@ abstract contract FastFillBase is IFastFill, Ownable, ReentrancyGuard {
     // Admin
     // ---------------------------------------------------------------------------------------------
 
-    function setRemoteAdapter(uint32 chainId, bytes32 adapter) external onlyOwner {
-        remoteAdapter[chainId] = adapter;
-    }
-
     function setMaxFeeRate(uint256 newMaxFeeRate) external onlyOwner {
         if (newMaxFeeRate > PricingLib.WAD) revert InvalidMaxFeeRate(newMaxFeeRate);
         maxFeeRate = newMaxFeeRate;
@@ -261,13 +380,5 @@ abstract contract FastFillBase is IFastFill, Ownable, ReentrancyGuard {
 
     function setPaused(bool newPaused) external onlyOwner {
         paused = newPaused;
-    }
-
-    function setFillAllowlistEnabled(bool enabled) external onlyOwner {
-        fillAllowlistEnabled = enabled;
-    }
-
-    function setAllowedFiller(address filler, bool allowed) external onlyOwner {
-        allowedFiller[filler] = allowed;
     }
 }

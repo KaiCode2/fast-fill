@@ -3,26 +3,26 @@ pragma solidity ^0.8.26;
 
 import {Script, console2} from "forge-std/Script.sol";
 import {CctpAdapter} from "../src/adapters/CctpAdapter.sol";
-import {Addresses} from "./config/Addresses.sol";
 
-/// @notice Deploy a CctpAdapter wired to the canonical CCTP v2 contracts.
-/// @dev Env: USDC (address), optional OWNER (address), optional MAX_FEE_RATE (uint, WAD).
-///      Post-deploy, the owner must call setDomain(...) and setRemoteAdapter(...) for each
-///      counterpart chain (see README).
+/// @notice CREATE2-deploy a CctpAdapter against the deterministic FastFillConfig registry.
+/// @dev Env: CONFIG (the FastFillConfig address — identical on every chain), optional OWNER,
+///      optional MAX_FEE_RATE (WAD). For a deterministic adapter address across chains, deploy from
+///      the same EOA with identical args (same CONFIG, OWNER, MAX_FEE_RATE). No post-deploy wiring
+///      is needed — domains/USDC/counterpart are all resolved from CONFIG at call time.
 contract DeployCctpAdapter is Script {
+    bytes32 internal constant SALT = keccak256("fast-fill.cctp.v1");
+
     function run() external returns (CctpAdapter adapter) {
+        address config = vm.envAddress("CONFIG");
         address owner = vm.envOr("OWNER", msg.sender);
         uint256 maxFeeRate = vm.envOr("MAX_FEE_RATE", uint256(5e15)); // 0.5%
-        address usdc = vm.envAddress("USDC");
 
         vm.startBroadcast();
-        adapter = new CctpAdapter(
-            owner, maxFeeRate, Addresses.CCTP_TOKEN_MESSENGER_V2, Addresses.CCTP_MESSAGE_TRANSMITTER_V2, usdc
-        );
+        adapter = new CctpAdapter{salt: SALT}(config, owner, maxFeeRate);
         vm.stopBroadcast();
 
         console2.log("CctpAdapter:", address(adapter));
+        console2.log("config:", config);
         console2.log("owner:", owner);
-        console2.log("usdc:", usdc);
     }
 }

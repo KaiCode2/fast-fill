@@ -12,11 +12,22 @@ library Addresses {
 
     // --- USDC (per chain) ---
     address internal constant USDC_ETHEREUM = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
+    address internal constant USDC_OPTIMISM = 0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85;
     address internal constant USDC_BASE = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
     address internal constant USDC_ARBITRUM = 0xaf88d065e77c8cC2239327C5EDb3A432268e5831;
 
     // --- LayerZero v2 EndpointV2 (same address across chains) ---
     address internal constant LZ_ENDPOINT_V2 = 0x1a44076050125825900e736c501f859c50fE728c;
+
+    // --- USDT0 (LayerZero OFT). `OFT` is the proxy we call send() on; `TOKEN` is the ERC20 users
+    //     hold (a DIFFERENT address per chain). Ethereum is the lockbox OFTAdapter over USDT.
+    //     Source: github.com/Everdawn-Labs/usdt0-audit-reports/blob/main/DEPLOYMENTS.md ---
+    address internal constant USDT0_OFT_ETHEREUM = 0x6C96dE32CEa08842dcc4058c14d3aaAD7Fa41dee;
+    address internal constant USDT0_TOKEN_ETHEREUM = 0xdAC17F958D2ee523a2206206994597C13D831ec7; // USDT
+    address internal constant USDT0_OFT_OPTIMISM = 0xF03b4d9AC1D5d1E7c4cEf54C2A313b9fe051A0aD;
+    address internal constant USDT0_TOKEN_OPTIMISM = 0x01bFF41798a0BcF287b996046Ca68b395DbC1071;
+    address internal constant USDT0_OFT_ARBITRUM = 0x14E4A1B13bf7F943c8ff7C51fb60FA964A298D92;
+    address internal constant USDT0_TOKEN_ARBITRUM = 0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9;
 
     // --- EVM chain ids ---
     uint32 internal constant CHAIN_ETHEREUM = 1;
@@ -34,6 +45,7 @@ library Addresses {
 
     // --- LayerZero endpoint ids ---
     uint32 internal constant EID_ETHEREUM = 30_101;
+    uint32 internal constant EID_OPTIMISM = 30_111;
     uint32 internal constant EID_ARBITRUM = 30_110;
     uint32 internal constant EID_BASE = 30_184;
 }
