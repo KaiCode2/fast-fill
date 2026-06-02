@@ -102,8 +102,10 @@ The **CCTP** and **OFT** adapters are **deployed at separate addresses**, so the
 
 ### Settlement authentication
 
-- **CCTP:** the source sets `mintRecipient = destinationCaller = the destination adapter`, so only that adapter can call `receiveMessage`. After it mints `amount − feeExecuted` USDC and consumes the CCTP nonce, the adapter additionally requires the burn's `messageSender` to be its **registered source adapter** — so a burn crafted by anyone else (with a forged order in `hookData`) can never be settled.
-- **OFT:** `lzCompose` is gated by three checks — caller is the Endpoint, the local `from` OFT is ours, and the embedded `composeFrom` is our registered source adapter.
+Each adapter is CREATE2-deterministic, so its counterpart on every chain is **the same address — `address(this)`**:
+
+- **CCTP:** the source sets `mintRecipient = destinationCaller = address(this)`, so only this adapter can call `receiveMessage`. After it mints `amount − feeExecuted` USDC and consumes the CCTP nonce, it additionally requires the burn's `messageSender == address(this)` — so a burn crafted by anyone else (with a forged order in `hookData`) can never be settled.
+- **OFT:** `lzCompose` is gated by three checks — caller is the Endpoint, the local `from` OFT is the one in the registry, and the embedded `composeFrom == address(this)`.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full CCTP/OFT authentication flows, the per-chain USDC handling, and the security model.
 
@@ -116,7 +118,7 @@ forge test --mt invariant -vvv
 FOUNDRY_PROFILE=ci forge test
 ```
 
-56 tests in total: pure-library unit + fuzz, full CCTP & OFT lifecycle, races, adversarial, invariants (16k+ calls), and **mainnet-fork** checks that run automatically when an RPC is available (otherwise they self-skip) — including an **Optimism fork end-to-end against the real USD₮0 OFT** that proves USD₮0 forwards our compose message, mints to the adapter, and settles. Dependencies (git submodules under `lib/`): `forge-std`, `solady`.
+66 tests in total: pure-library unit + fuzz, full CCTP & OFT lifecycle, races, adversarial, invariants (16k+ calls), gasless approval flows, and **mainnet-fork** checks that run automatically when an RPC is available (otherwise they self-skip) — including an **Optimism fork end-to-end against the real USD₮0 OFT** (proves USD₮0 forwards our compose, mints, settles) and a **fork against the real Permit2** (proves a sponsored intent's signature + witness binding). Dependencies (git submodules under `lib/`): `forge-std`, `solady`.
 
 ### A note on dependencies
 
@@ -130,18 +132,26 @@ ALCHEMY_API_KEY=... FOUNDRY_PROFILE=fork forge test --match-path "test/fork/**" 
 
 ## Deploy
 
+All chain-specific data (CCTP/LZ addresses, domains, eids, per-chain USDC and USD₮0 tokens) lives in one immutable [`FastFillConfig`](src/config/FastFillConfig.sol) registry. Deploy it **once via CREATE2** so it lands at the same address on every chain, then deploy each adapter with that address — **there is no per-counterpart wiring to get wrong.**
+
 ```bash
-USDC=0x... forge script script/DeployCctpAdapter.s.sol --rpc-url $RPC --broadcast
-OFT=0x...  forge script script/DeployOftAdapter.s.sol  --rpc-url $RPC --broadcast
+# 1. Deploy the registry (same EOA + salt on every chain => same address everywhere)
+forge script script/DeployFastFillConfig.s.sol --rpc-url $RPC --broadcast
+
+# 2. Deploy the adapters against it (CONFIG is identical on every chain, so are the adapters)
+CONFIG=0x... forge script script/DeployCctpAdapter.s.sol --rpc-url $RPC --broadcast
+CONFIG=0x... forge script script/DeployOftAdapter.s.sol  --rpc-url $RPC --broadcast
 ```
 
-After deploying an adapter on each chain, the owner wires the counterparts:
+Because the registry, the owner, and the fee cap are identical across chains, each adapter is **CREATE2-deterministic** — the same address everywhere — so the counterpart adapter is simply `address(this)`. The adapter resolves every value from the registry at call time, and **cross-checks the local domain/eid/token against the live bridge contracts on each use**, reverting on any mismatch (a wrong constant cannot silently ship). Adding a chain means publishing a new registry version; there are no owner setters for addresses. The canonical addresses are in [`FastFillConfig`](src/config/FastFillConfig.sol) (with a `script/config/Addresses.sol` mirror used only by tests/scripts, bound to the registry by a consistency test). A worked CCTP example is in [DEMO.md](DEMO.md).
 
-- **CCTP:** `setDomain(chainId, cctpDomain)` for the local and each remote chain, `setRemoteAdapter(remoteChainId, remoteAdapterAsBytes32)`, and `setRemoteUsdc(remoteChainId, remoteUsdcAddress)`.
-- **OFT:** `setEid(chainId, lzEid)` similarly, then `setRemoteAdapter(...)` and `setRemoteOftToken(remoteChainId, remoteTokenAddress)` — an OFT token is a **different address per chain** (e.g. USD₮0 is `0x01bF…` on Optimism but `0xFd08…` on Arbitrum), so the source stamps the order's `outputToken` with the destination's token.
+## Gasless & sponsored transfers
 
-Canonical mainnet addresses, domains, and eids are in [`script/config/Addresses.sol`](script/config/Addresses.sol). A worked, on-chain example is in [DEMO.md](DEMO.md).
+Both adapters support signature-based funding so a user (or relayer) need only **sign**, not send:
+
+- **EIP-2612 single-tx** (self-submitted): batch a `selfPermit` before the action — `multicall([selfPermit(token, …), initiateCCTP(…)])` — so the approval and the bridge land in one transaction. Works for USDC and USD₮0 (both support `permit`).
+- **Permit2 sponsored intent** (`initiate*For` / `fillFor`): a user signs an off-chain bridge intent and hands it to relayers; a relayer submits it and pays gas, while the funds are pulled from the **signer** via Permit2 and the signer is recorded as the order's sender. The Permit2 signature commits to a **witness** (the order intent / the orderId), so the submitter cannot alter the recipient, amounts, timing, or rate — proven against the real Permit2 in [`test/fork/PermitFork.t.sol`](test/fork/PermitFork.t.sol), including a rejected tampering attempt.
 
 ## Status
 
-Prototype. Not audited. The pricing curve and surplus routing (currently → recipient) are intended iteration points. Filling is **permissionless** — anyone may fill, since the `orderId` invariant makes a fill against a fabricated order self-punishing. The **CCTP path** is proven live on Base ⇄ Arbitrum. The **OFT path** targets **USD₮0** and is proven against the real USD₮0 OFT + LayerZero endpoint on an Optimism fork (compose forwarding + real mint + settle); a live USD₮0 demo is the next step.
+Prototype. Not audited. The pricing curve and surplus routing (currently → recipient) are intended iteration points. Filling is **permissionless** — anyone may fill, since the `orderId` invariant makes a fill against a fabricated order self-punishing. Config is an **immutable CREATE2 registry** (deterministic adapter addresses, no per-deploy wiring); users and relayers can act via **EIP-2612 or Permit2 signatures** (single-tx or sponsored). The **CCTP path** is proven live on Base ⇄ Arbitrum. The **OFT path** targets **USD₮0** and is proven against the real USD₮0 OFT + LayerZero endpoint on an Optimism fork (compose forwarding + real mint + settle); a live USD₮0 demo is the next step.

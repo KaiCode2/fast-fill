@@ -7,6 +7,7 @@ import {FastFillBase} from "../FastFillBase.sol";
 import {Order, OrderLib} from "../libraries/OrderLib.sol";
 import {AddressCast} from "../libraries/AddressCast.sol";
 import {BurnMessageV2Lib} from "../libraries/BurnMessageV2Lib.sol";
+import {PermitLib} from "../libraries/PermitLib.sol";
 import {ITokenMessengerV2} from "../interfaces/cctp/ITokenMessengerV2.sol";
 import {IMessageTransmitterV2} from "../interfaces/cctp/IMessageTransmitterV2.sol";
 import {IFastFillConfig, ChainConfig} from "../interfaces/IFastFillConfig.sol";
@@ -61,6 +62,8 @@ contract CctpAdapter is FastFillBase {
     // ---------------------------------------------------------------------------------------------
 
     /// @notice Burn USDC on this chain and create an optimistically-fillable order on `dstChainId`.
+    ///         `msg.sender` is the user and the payer (approve this adapter, or batch a `selfPermit`
+    ///         via `multicall` for a single transaction).
     /// @param maxFee The max fast-transfer fee. `outputAmount = inputAmount - maxFee` is the
     ///               deterministic worst-case amount the filler is owed (feeExecuted <= maxFee).
     /// @param minFinalityThreshold <= 1000 selects a fast (soft-finality) transfer.
@@ -74,22 +77,60 @@ contract CctpAdapter is FastFillBase {
         uint256 discountRate
     ) external whenNotPaused returns (bytes32 orderId, uint64 nonce) {
         if (maxFee >= inputAmount) revert MaxFeeTooHigh(maxFee, inputAmount);
+        SafeTransferLib.safeTransferFrom(config.chainConfig(block.chainid).usdc, msg.sender, address(this), inputAmount);
+        nonce = _nextNonce();
+        Order memory order = _buildOrder(
+            msg.sender, dstChainId, recipient, inputAmount, maxFee, expectedDeliveryTime, discountRate, nonce
+        );
+        _assertCreatable(order);
+        orderId = _finishInitiate(order, maxFee, minFinalityThreshold);
+    }
 
+    /// @notice Sponsored initiate: a third party submits, but the USDC is pulled from `from` against
+    ///         its Permit2 signature, and `from` is recorded as the order's sender. The signature
+    ///         commits to `orderWitness(...)`, so the submitter cannot alter the recipient, amounts,
+    ///         timing, or rate `from` agreed to. This is the on-chain half of a signed bridge intent.
+    function initiateCCTPFor(
+        uint32 dstChainId,
+        bytes32 recipient,
+        uint256 inputAmount,
+        uint256 maxFee,
+        uint32 minFinalityThreshold,
+        uint64 expectedDeliveryTime,
+        uint256 discountRate,
+        address from,
+        PermitLib.Permit2Data calldata permit
+    ) external whenNotPaused returns (bytes32 orderId, uint64 nonce) {
+        if (maxFee >= inputAmount) revert MaxFeeTooHigh(maxFee, inputAmount);
         nonce = _nextNonce();
         Order memory order =
-            _buildOrder(dstChainId, recipient, inputAmount, maxFee, expectedDeliveryTime, discountRate, nonce);
+            _buildOrder(from, dstChainId, recipient, inputAmount, maxFee, expectedDeliveryTime, discountRate, nonce);
         _assertCreatable(order);
+        _pullOrderViaPermit2(order, from, permit); // pull AFTER building so the witness binds the order
+        orderId = _finishInitiate(order, maxFee, minFinalityThreshold);
+    }
+
+    /// @dev Hash, burn, and emit, once the order is built and the USDC is held by this adapter.
+    function _finishInitiate(Order memory order, uint256 maxFee, uint32 minFinalityThreshold)
+        private
+        returns (bytes32 orderId)
+    {
         orderId = order.hash();
-
-        _pullAndBurn(order, maxFee, minFinalityThreshold);
-
+        _dispatchBurn(order, maxFee, minFinalityThreshold);
         emit OrderCreated(
-            orderId, OrderLib.BRIDGE_CCTP, msg.sender, dstChainId, order.outputToken, order.outputAmount, nonce
+            orderId,
+            OrderLib.BRIDGE_CCTP,
+            order.sender.toAddress(),
+            order.dstChainId,
+            order.outputToken,
+            order.outputAmount,
+            order.nonce
         );
     }
 
-    /// @dev Split out of `initiateCCTP` to keep each stack frame shallow (avoids stack-too-deep).
+    /// @dev Split out to keep each stack frame shallow (avoids stack-too-deep).
     function _buildOrder(
+        address from,
         uint32 dstChainId,
         bytes32 recipient,
         uint256 inputAmount,
@@ -106,7 +147,7 @@ contract CctpAdapter is FastFillBase {
             bridgeType: OrderLib.BRIDGE_CCTP,
             srcChainId: uint32(block.chainid),
             dstChainId: dstChainId,
-            sender: msg.sender.toBytes32(),
+            sender: from.toBytes32(),
             recipient: recipient,
             inputToken: inUsdc.toBytes32(),
             outputToken: outUsdc.toBytes32(),
@@ -119,13 +160,12 @@ contract CctpAdapter is FastFillBase {
         });
     }
 
-    /// @dev Pull USDC, approve the TokenMessenger, and burn-with-hook to ourselves on the dst chain.
-    function _pullAndBurn(Order memory order, uint256 maxFee, uint32 minFinalityThreshold) private {
+    /// @dev Approve the TokenMessenger and burn-with-hook to ourselves on the dst chain. The USDC is
+    ///      already held by this adapter (pulled by the entrypoint).
+    function _dispatchBurn(Order memory order, uint256 maxFee, uint32 minFinalityThreshold) private {
         ChainConfig memory lc = config.chainConfig(block.chainid);
         _assertLocalDomain(lc.cctpTokenMessenger, lc.cctpDomain);
-
         uint32 dstDomain = config.chainConfig(order.dstChainId).cctpDomain;
-        SafeTransferLib.safeTransferFrom(lc.usdc, msg.sender, address(this), order.inputAmount);
         _burn(
             lc.cctpTokenMessenger,
             lc.usdc,
