@@ -144,4 +144,4 @@ Canonical mainnet addresses, domains, and eids are in [`script/config/Addresses.
 
 ## Status
 
-Prototype. Not audited. The pricing curve, surplus routing (currently → recipient), and relayer permissioning (currently permissionless, with an optional owner allowlist) are intended iteration points. The **CCTP path** is proven live on Base ⇄ Arbitrum. The **OFT path** targets **USD₮0** and is proven against the real USD₮0 OFT + LayerZero endpoint on an Optimism fork (compose forwarding + real mint + settle); a live USD₮0 demo is the next step.
+Prototype. Not audited. The pricing curve and surplus routing (currently → recipient) are intended iteration points. Filling is **permissionless** — anyone may fill, since the `orderId` invariant makes a fill against a fabricated order self-punishing. The **CCTP path** is proven live on Base ⇄ Arbitrum. The **OFT path** targets **USD₮0** and is proven against the real USD₮0 OFT + LayerZero endpoint on an Optimism fork (compose forwarding + real mint + settle); a live USD₮0 demo is the next step.

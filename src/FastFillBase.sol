@@ -35,7 +35,6 @@ abstract contract FastFillBase is IFastFill, Ownable, ReentrancyGuard {
     error WrongDestinationChain(uint32 expected);
     error OrderAlreadyActive(bytes32 orderId);
     error AlreadySettled(bytes32 orderId);
-    error FillerNotAllowed(address filler);
     error NothingToClaim();
     error InvalidMaxFeeRate(uint256 maxFeeRate);
     error InvalidWindow(uint64 startTime, uint64 expectedDeliveryTime);
@@ -58,9 +57,6 @@ abstract contract FastFillBase is IFastFill, Ownable, ReentrancyGuard {
     ///         Used as the CCTP mintRecipient/destinationCaller, the OFT `to`, and the OFT peer.
     mapping(uint32 chainId => bytes32 adapter) public remoteAdapter;
 
-    /// @notice Allowlisted fillers (only consulted when `fillAllowlistEnabled`).
-    mapping(address filler => bool) public allowedFiller;
-
     /// @notice Per-adapter governance cap on the fee rate, WAD (<= 1e18).
     uint256 public maxFeeRate;
 
@@ -69,9 +65,6 @@ abstract contract FastFillBase is IFastFill, Ownable, ReentrancyGuard {
 
     /// @notice When true, initiate/fill/settle are blocked (claim is never blocked).
     bool public paused;
-
-    /// @notice When true, only allowlisted addresses may call `fill` (default false).
-    bool public fillAllowlistEnabled;
 
     // ---------------------------------------------------------------------------------------------
     // Construction
@@ -106,7 +99,6 @@ abstract contract FastFillBase is IFastFill, Ownable, ReentrancyGuard {
     function fill(Order calldata order) external nonReentrant whenNotPaused returns (bytes32 orderId) {
         if (order.bridgeType != _bridgeType()) revert WrongBridgeType(_bridgeType(), order.bridgeType);
         if (block.chainid != order.dstChainId) revert WrongDestinationChain(order.dstChainId);
-        if (fillAllowlistEnabled && !allowedFiller[msg.sender]) revert FillerNotAllowed(msg.sender);
 
         orderId = order.hash();
         OrderRecord storage rec = _orders[orderId];
@@ -261,13 +253,5 @@ abstract contract FastFillBase is IFastFill, Ownable, ReentrancyGuard {
 
     function setPaused(bool newPaused) external onlyOwner {
         paused = newPaused;
-    }
-
-    function setFillAllowlistEnabled(bool enabled) external onlyOwner {
-        fillAllowlistEnabled = enabled;
-    }
-
-    function setAllowedFiller(address filler, bool allowed) external onlyOwner {
-        allowedFiller[filler] = allowed;
     }
 }

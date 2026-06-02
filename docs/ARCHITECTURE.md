@@ -23,7 +23,7 @@ flowchart TB
         FILL["fill()"]
         SET["_settle() + _payout (pull-payment fallback)"]
         REG["registries: remoteAdapter, domains/eids, remoteUsdc"]
-        ADM["admin: pause, Ownable, fill allowlist"]
+        ADM["admin: pause, Ownable"]
     end
 
     CA["CctpAdapter<br/>initiateCCTP() · settle(message, attestation)"]
@@ -271,8 +271,9 @@ Owner-gated (`Ownable`), per adapter:
   destinationCaller, OFT `to`, and the OFT/CCTP peer used for the anti-forgery check).
 - CCTP: `setDomain(chainId, domain)`, `setRemoteUsdc(chainId, token)`.
 - OFT: `setEid(chainId, eid)`.
-- `setMaxFeeRate(rate)`, `setPaused(bool)`, `setFillAllowlistEnabled(bool)` + `setAllowedFiller(...)`
-  (optional incident circuit-breaker; filling is permissionless by default).
+- `setMaxFeeRate(rate)`, `setPaused(bool)`. Filling is **permissionless** — anyone may fill, since
+  the `orderId` invariant makes a fill against a fabricated order self-punishing (the filler simply
+  is never reimbursed). There is no filler allowlist.
 
 ---
 
@@ -291,6 +292,5 @@ Owner-gated (`Ownable`), per adapter:
 | Underpaying the user on fill | `fill` computes `payout` on-chain and pulls exactly that from the relayer. |
 | Cross-adapter confusion | `order.bridgeType` + token/peer/chain checks + physically separate deployments. |
 
-> **Status:** prototype, not audited. The pricing curve, surplus routing (currently → recipient),
-> and relayer permissioning (permissionless with an optional allowlist) are intended iteration
-> points.
+> **Status:** prototype, not audited. The pricing curve and surplus routing (currently → recipient)
+> are intended iteration points. Filling is permissionless by design.

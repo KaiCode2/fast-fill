@@ -334,27 +334,4 @@ contract CctpLifecycleTest is Fixtures {
         vm.prank(relayer);
         dstCctp.fill(order);
     }
-
-    function test_allowlist_gatesFillers() public {
-        (Order memory order, bytes32 orderId) = _createOrder();
-        vm.prank(owner);
-        dstCctp.setFillAllowlistEnabled(true);
-
-        vm.chainId(DST_CHAIN);
-        vm.warp(order.startTime + 10);
-        (uint256 payout,) = dstCctp.quoteFill(order, block.timestamp);
-        usdc.mint(relayer, payout);
-
-        vm.startPrank(relayer);
-        usdc.approve(address(dstCctp), payout);
-        vm.expectRevert(abi.encodeWithSelector(FastFillBase.FillerNotAllowed.selector, relayer));
-        dstCctp.fill(order);
-        vm.stopPrank();
-
-        vm.prank(owner);
-        dstCctp.setAllowedFiller(relayer, true);
-        vm.prank(relayer);
-        dstCctp.fill(order);
-        assertEq(dstCctp.getOrder(orderId).filler, relayer, "allowlisted filler succeeds");
-    }
 }
