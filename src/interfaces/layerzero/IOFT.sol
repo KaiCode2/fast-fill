@@ -41,4 +41,8 @@ interface IOFT {
 
     /// @notice The underlying ERC20 delivered/locked by this OFT.
     function token() external view returns (address);
+
+    /// @notice The LayerZero v2 endpoint this OFT is wired to. Read by the adapter so the endpoint
+    ///         address never has to be configured separately.
+    function endpoint() external view returns (address);
 }

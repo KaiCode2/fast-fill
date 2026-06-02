@@ -15,6 +15,9 @@ contract MockMessageTransmitterV2 is IMessageTransmitterV2 {
     using AddressCast for bytes32;
 
     address public immutable mintToken;
+    /// @dev This chain's CCTP domain (read + cross-checked by the adapter). Auto-getter satisfies
+    ///      IMessageTransmitterV2.localDomain().
+    uint32 public immutable localDomain;
     bool public acceptAttestation = true;
     mapping(bytes32 nonce => bool used) public usedNonces;
 
@@ -22,8 +25,9 @@ contract MockMessageTransmitterV2 is IMessageTransmitterV2 {
     error UnauthorizedCaller(address caller, bytes32 destinationCaller);
     error NonceAlreadyUsed(bytes32 nonce);
 
-    constructor(address mintToken_) {
+    constructor(address mintToken_, uint32 localDomain_) {
         mintToken = mintToken_;
+        localDomain = localDomain_;
     }
 
     function setAcceptAttestation(bool value) external {

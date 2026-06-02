@@ -9,4 +9,7 @@ pragma solidity ^0.8.26;
 ///      `destinationCaller` — requires `msg.sender == destinationCaller`.
 interface IMessageTransmitterV2 {
     function receiveMessage(bytes calldata message, bytes calldata attestation) external returns (bool success);
+
+    /// @notice This chain's CCTP domain. Read by the adapter and cross-checked against the registry.
+    function localDomain() external view returns (uint32);
 }

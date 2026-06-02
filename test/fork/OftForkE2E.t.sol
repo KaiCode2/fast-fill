@@ -4,6 +4,7 @@ pragma solidity ^0.8.26;
 import {ForkBase} from "./ForkBase.sol";
 import {Addresses} from "../../script/config/Addresses.sol";
 import {OftAdapter} from "../../src/adapters/OftAdapter.sol";
+import {FastFillConfig} from "../../src/config/FastFillConfig.sol";
 import {Order, OrderLib} from "../../src/libraries/OrderLib.sol";
 import {AddressCast} from "../../src/libraries/AddressCast.sol";
 import {OFTComposeMsgCodec} from "../../src/libraries/OFTComposeMsgCodec.sol";
@@ -68,7 +69,7 @@ contract OftForkE2ETest is ForkBase {
     ILzEndpointCompose internal lzEndpoint = ILzEndpointCompose(Addresses.LZ_ENDPOINT_V2);
 
     OftAdapter internal adapter;
-    address internal srcAdapter = makeAddr("arbitrumSourceAdapter"); // the remote (Arbitrum) peer adapter
+    address internal sender = makeAddr("sourceUser"); // the user who initiated on Arbitrum
     address internal recipient = makeAddr("recipient");
     address internal relayer = makeAddr("relayer");
 
@@ -77,12 +78,9 @@ contract OftForkE2ETest is ForkBase {
 
     function _setUpFork() internal returns (bool) {
         if (!_forkOrSkip(_opRpcUrl())) return false;
-        // Deploy our adapter on the Optimism fork, wired to the REAL OFT + endpoint.
-        adapter = new OftAdapter(address(this), 5e15, Addresses.LZ_ENDPOINT_V2, Addresses.USDT0_OFT_OPTIMISM);
-        adapter.setEid(Addresses.CHAIN_OPTIMISM, Addresses.EID_OPTIMISM);
-        adapter.setEid(Addresses.CHAIN_ARBITRUM, Addresses.EID_ARBITRUM);
-        adapter.setRemoteAdapter(Addresses.CHAIN_ARBITRUM, srcAdapter.toBytes32());
-        adapter.setRemoteOftToken(Addresses.CHAIN_ARBITRUM, Addresses.USDT0_TOKEN_ARBITRUM);
+        // Deploy our adapter on the Optimism fork against the real config (reads the real OFT +
+        // endpoint live). No wiring: the counterpart is address(this) and routing comes from config.
+        adapter = new OftAdapter(address(new FastFillConfig()), address(this), 5e15);
         return true;
     }
 
@@ -108,7 +106,7 @@ contract OftForkE2ETest is ForkBase {
         Order memory order = _order();
         SendParam memory sp = SendParam({
             dstEid: Addresses.EID_ARBITRUM,
-            to: srcAdapter.toBytes32(),
+            to: address(adapter).toBytes32(),
             amountLD: ONE,
             minAmountLD: ONE,
             extraOptions: _composeOptions(80_000, 200_000),
@@ -181,7 +179,7 @@ contract OftForkE2ETest is ForkBase {
             bridgeType: OrderLib.BRIDGE_OFT,
             srcChainId: Addresses.CHAIN_ARBITRUM,
             dstChainId: Addresses.CHAIN_OPTIMISM,
-            sender: srcAdapter.toBytes32(),
+            sender: sender.toBytes32(),
             recipient: recipient.toBytes32(),
             inputToken: Addresses.USDT0_TOKEN_ARBITRUM.toBytes32(),
             outputToken: token.toBytes32(), // delivered on Optimism = local USDT0
@@ -201,8 +199,9 @@ contract OftForkE2ETest is ForkBase {
         require(peer != bytes32(0), "no arbitrum peer");
         Origin memory origin = Origin({srcEid: Addresses.EID_ARBITRUM, sender: peer, nonce: 1});
 
-        // OFT message layout: sendTo(32) | amountSD(8) | composeFrom(32) | composeMsg.
-        bytes memory composeBody = abi.encodePacked(srcAdapter.toBytes32(), OrderLib.encode(order));
+        // OFT message layout: sendTo(32) | amountSD(8) | composeFrom(32) | composeMsg. composeFrom is
+        // our adapter on Arbitrum — the same deterministic address as this adapter.
+        bytes memory composeBody = abi.encodePacked(address(adapter).toBytes32(), OrderLib.encode(order));
         bytes memory oftMessage = abi.encodePacked(address(adapter).toBytes32(), uint64(amount), composeBody);
 
         vm.prank(Addresses.LZ_ENDPOINT_V2);

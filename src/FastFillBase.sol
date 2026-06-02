@@ -39,7 +39,7 @@ abstract contract FastFillBase is IFastFill, Ownable, ReentrancyGuard {
     error InvalidMaxFeeRate(uint256 maxFeeRate);
     error InvalidWindow(uint64 startTime, uint64 expectedDeliveryTime);
     error InvalidOutputAmount(uint256 outputAmount, uint256 inputAmount);
-    error UnknownRemoteAdapter(uint32 chainId);
+    error UnsupportedChain(uint32 chainId);
     error NotSourceChain(uint32 srcChainId);
     error ZeroRecipient();
 
@@ -52,10 +52,6 @@ abstract contract FastFillBase is IFastFill, Ownable, ReentrancyGuard {
 
     /// @notice Funds that failed to push (e.g. reverting/blacklisted recipient), claimable later.
     mapping(address account => mapping(address token => uint256)) internal _claimable;
-
-    /// @notice The fast-fill adapter address on each remote chain (bytes32 to allow non-EVM later).
-    ///         Used as the CCTP mintRecipient/destinationCaller, the OFT `to`, and the OFT peer.
-    mapping(uint32 chainId => bytes32 adapter) public remoteAdapter;
 
     /// @notice Per-adapter governance cap on the fee rate, WAD (<= 1e18).
     uint256 public maxFeeRate;
@@ -90,6 +86,11 @@ abstract contract FastFillBase is IFastFill, Ownable, ReentrancyGuard {
     /// @dev Validate that `order.outputToken` is the token this adapter settles in, and return
     ///      its ERC20 address. Reverts on mismatch. Used by both `fill` and `_settle`.
     function _resolveOutputToken(Order memory order) internal view virtual returns (address token);
+
+    /// @dev Revert unless `chainId` is a supported counterpart for this bridge (per the config
+    ///      registry). This is the "does the remote chain exist" check that replaces the old
+    ///      remote-adapter registry now that the counterpart is always `address(this)`.
+    function _requireSupportedRemote(uint32 chainId) internal view virtual;
 
     // ---------------------------------------------------------------------------------------------
     // Optimistic fill (destination, before the bridge message arrives)
@@ -202,7 +203,7 @@ abstract contract FastFillBase is IFastFill, Ownable, ReentrancyGuard {
     /// @dev Common create-time validation. Adapters add bridge-specific checks (token, domain/eid).
     function _assertCreatable(Order memory order) internal view {
         if (order.srcChainId != block.chainid) revert NotSourceChain(order.srcChainId);
-        if (remoteAdapter[order.dstChainId] == bytes32(0)) revert UnknownRemoteAdapter(order.dstChainId);
+        _requireSupportedRemote(order.dstChainId);
         if (order.expectedDeliveryTime <= order.startTime) {
             revert InvalidWindow(order.startTime, order.expectedDeliveryTime);
         }
@@ -241,10 +242,6 @@ abstract contract FastFillBase is IFastFill, Ownable, ReentrancyGuard {
     // ---------------------------------------------------------------------------------------------
     // Admin
     // ---------------------------------------------------------------------------------------------
-
-    function setRemoteAdapter(uint32 chainId, bytes32 adapter) external onlyOwner {
-        remoteAdapter[chainId] = adapter;
-    }
 
     function setMaxFeeRate(uint256 newMaxFeeRate) external onlyOwner {
         if (newMaxFeeRate > PricingLib.WAD) revert InvalidMaxFeeRate(newMaxFeeRate);
