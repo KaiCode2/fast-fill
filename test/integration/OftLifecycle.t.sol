@@ -4,6 +4,7 @@ pragma solidity ^0.8.26;
 import {Fixtures} from "../utils/Fixtures.sol";
 import {Order, OrderLib, Execution} from "../../src/libraries/OrderLib.sol";
 import {PricingLib} from "../../src/libraries/PricingLib.sol";
+import {AddressCast} from "../../src/libraries/AddressCast.sol";
 import {FastFillBase} from "../../src/FastFillBase.sol";
 import {OftAdapter} from "../../src/adapters/OftAdapter.sol";
 import {FillStatus, OrderRecord} from "../../src/interfaces/IFastFill.sol";
@@ -13,8 +14,9 @@ contract OftLifecycleTest is Fixtures {
     uint256 constant MIN_OUT = 999e18;
     uint256 constant RATE = 1e13; // 0.001% / sec
     uint64 constant WINDOW = 100;
+    bytes internal constant HOOK = hex"feed";
 
-    function setUp() public {
+    function setUp() public virtual {
         vm.warp(1_000_000);
         _setUpOft();
     }
@@ -76,6 +78,71 @@ contract OftLifecycleTest is Fixtures {
         assertEq(oftToken.lastMinAmountLD(), MIN_OUT, "minAmountLD");
         assertEq(oftToken.balanceOf(user), 0, "user funds pulled");
         assertEq(oftToken.balanceOf(address(srcOft)), 0, "adapter debited by OFT");
+    }
+
+    function test_initiate_malformedRecipient_revertsBeforeSend() public {
+        bytes32 malformed = bytes32(uint256(uint160(recipient)) | (uint256(1) << 160));
+        oftToken.mint(user, INPUT);
+
+        vm.chainId(SRC_CHAIN);
+        vm.startPrank(user);
+        oftToken.approve(address(srcOft), INPUT);
+        vm.expectRevert(abi.encodeWithSelector(AddressCast.InvalidAddress.selector, malformed));
+        srcOft.initiateOFT(DST_CHAIN, malformed, INPUT, MIN_OUT, "", WINDOW, RATE, 0, Execution(0, ""));
+        vm.stopPrank();
+
+        assertEq(oftToken.sendCount(), 0, "no OFT send");
+        assertEq(oftToken.balanceOf(user), INPUT, "funds not pulled");
+    }
+
+    function test_initiate_zeroRecipient_revertsBeforeSend() public {
+        oftToken.mint(user, INPUT);
+
+        vm.chainId(SRC_CHAIN);
+        vm.startPrank(user);
+        oftToken.approve(address(srcOft), INPUT);
+        vm.expectRevert(FastFillBase.ZeroRecipient.selector);
+        srcOft.initiateOFT(DST_CHAIN, bytes32(0), INPUT, MIN_OUT, "", WINDOW, RATE, 0, Execution(0, ""));
+        vm.stopPrank();
+
+        assertEq(oftToken.sendCount(), 0, "no OFT send");
+        assertEq(oftToken.balanceOf(user), INPUT, "funds not pulled");
+    }
+
+    function test_initiate_callbackGasLimitTooHigh_revertsBeforeSend() public {
+        uint64 maxGas = srcOft.MAX_CALLBACK_GAS_LIMIT();
+        uint64 tooHigh = maxGas + 1;
+        oftToken.mint(user, INPUT);
+
+        vm.chainId(SRC_CHAIN);
+        vm.startPrank(user);
+        oftToken.approve(address(srcOft), INPUT);
+        vm.expectRevert(abi.encodeWithSelector(FastFillBase.InvalidCallbackGasLimit.selector, tooHigh, maxGas));
+        srcOft.initiateOFT(DST_CHAIN, _b32(recipient), INPUT, MIN_OUT, "", WINDOW, RATE, 0, Execution(tooHigh, HOOK));
+        vm.stopPrank();
+
+        assertEq(oftToken.sendCount(), 0, "no OFT send");
+        assertEq(oftToken.balanceOf(user), INPUT, "funds not pulled");
+    }
+
+    function test_initiate_maxCallbackGasLimitAccepted() public {
+        uint64 maxGas = srcOft.MAX_CALLBACK_GAS_LIMIT();
+        uint64 start = uint64(block.timestamp);
+        oftToken.mint(user, INPUT);
+
+        vm.chainId(SRC_CHAIN);
+        vm.startPrank(user);
+        oftToken.approve(address(srcOft), INPUT);
+        (bytes32 orderId, uint64 nonce) =
+            srcOft.initiateOFT(DST_CHAIN, _b32(recipient), INPUT, MIN_OUT, "", WINDOW, RATE, 0, Execution(maxGas, HOOK));
+        vm.stopPrank();
+
+        Order memory order = _oftOrder(INPUT, MIN_OUT, start, start + WINDOW, RATE, 0, nonce);
+        order.callbackGasLimit = maxGas;
+        order.hookData = HOOK;
+        assertEq(orderId, OrderLib.hash(order));
+        assertEq(keccak256(oftToken.lastComposeMsg()), keccak256(OrderLib.encode(order)), "composeMsg");
+        assertEq(oftToken.sendCount(), 1, "OFT send dispatched");
     }
 
     // ---------------------------------------------------------------------------------------------

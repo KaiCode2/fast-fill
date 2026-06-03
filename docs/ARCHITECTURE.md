@@ -48,18 +48,22 @@ flowchart TB
     OA --> CC
 ```
 
-The two adapters are **deployed at separate addresses**, so the CCTP USDC reimbursement pool and the
-OFT-token pool are physically isolated — a decode/auth bug in one adapter can never reach the
-other's funds. All shared lifecycle logic lives once in the `abstract` base (inlined at compile
-time, no extra call cost). Each adapter is **bidirectional**: it initiates outbound transfers *and*
-settles inbound ones, and is deployed on every supported chain.
+Every adapter is **deployed at its own address**, so each token's reimbursement pool is physically
+isolated — a decode/auth bug in one adapter can never reach another's funds. There is one
+`CctpAdapter` (USDC) and one `OftAdapter` **per OFT** — the OFT adapter is parameterized by an
+`oftId` (USD₮0, USDe, sUSDe, ENA, USDtb, …) and the `OftAdapterFactory` stamps out a new instance
+per id at a deterministic, cross-chain-stable address. All shared lifecycle logic lives once in the
+`abstract` base (inlined at compile time, no extra call cost). Each adapter is **bidirectional**: it
+initiates outbound transfers *and* settles inbound ones, and is deployed on every supported chain.
 
 | Contract | Responsibility |
 |---|---|
 | `FastFillBase` | Order book, status machine, `fill`/`fillFor`, `_settle`, `_payout` fallback, destination-execution callback (`onFastFill`), pricing call, pause, ownership, EIP-2612 `selfPermit` + Permit2 pulls + `Multicallable` |
-| `FastFillConfig` | Immutable CREATE2 chain registry — per-chain CCTP/LZ addresses, domains, eids, USDC + USD₮0 tokens; the single source the adapters read at call time |
+| `FastFillConfig` | Immutable CREATE2 chain registry — per-chain CCTP/LZ transport (`chainConfig`) plus each OFT's `(oft, token)` keyed by `(chainId, oftId)` (`oftConfig`); the single source the adapters read at call time |
 | `CctpAdapter` | `initiateCCTP`/`initiateCCTPFor` (burn-with-hook) and `settle(message, attestation)` (wraps `receiveMessage`) |
-| `OftAdapter` | `initiateOFT` (`send` with `composeMsg`) and `lzCompose` (LayerZero compose callback) |
+| `OftAdapter` | One per OFT (selected by `oftId`): `initiateOFT` (`send` with `composeMsg`) and `lzCompose` (LayerZero compose callback) |
+| `OftAdapterFactory` | `deploy(oftId)` — CREATE2-stamps an `OftAdapter` for an OFT at a deterministic, cross-chain-stable address (shared `config`/`owner`/`maxFeeRate` baked in) |
+| `OftId` | Stable numeric ids per OFT (USD₮0=0, USDe=1, sUSDe=2, ENA=3, USDtb=4) — append-only |
 | `OrderLib` | The `Order` struct and its canonical hash / encode / decode |
 | `PricingLib` | The time-decay fee curve (pure) |
 | `BurnMessageV2Lib` | Parse the fields fast-fill needs from a CCTP v2 message |
@@ -249,6 +253,17 @@ because Circle's reference contracts are pinned to solc `0.7.6` and can't be imp
 
 ## 7. LayerZero OFT integration
 
+**Many OFTs, one code path.** `OftAdapter` is generic: it is constructed for a single `oftId` and
+resolves its OFT entrypoint + ERC20 from `config.oftConfig(block.chainid, oftId)`. Onboarding a new
+OFT (USDe, sUSDe, ENA, USDtb, …) is therefore additive — add the per-chain rows to `FastFillConfig`,
+assign an `OftId`, and `OftAdapterFactory.deploy(oftId)` — with **no new adapter code**. Each `oftId`
+is a separate deployment at its own address (isolated pool), and because the factory bakes identical
+args and salts by `oftId`, that address is the **same on every chain** — which is exactly what the
+`composeFrom == address(this)` gate below requires. The OFT topology is handled uniformly: a *native*
+OFT has `oft == token`, an *adapter/lockbox* OFT (typically the home chain) has `oft != token`; the
+adapter always holds the configured ERC20, approves it to the OFT, and cross-checks `OFT.token()`
+against the registry, so both shapes work without special-casing.
+
 **Source.** `initiateOFT` pulls the OFT token and calls `OFT.send` with the order in `composeMsg`
 and `to == address(this)` (our adapter on the dst chain — the same CREATE2 address). `outputAmount =
 minAmountLD`.
@@ -304,6 +319,9 @@ never pausable). Effects (status) are written before any external transfer; `fil
 
 ## 9. Destination executions
 
+Initiate calls keep `recipient` as `bytes32` for bridge compatibility, but creation rejects any value that
+is not the canonical bytes32 form of an EVM address (upper 12 bytes zero), and rejects the zero address.
+
 An order may carry a destination-execution payload — `hookData` plus a user-signed `callbackGasLimit`.
 When the funds reach the recipient (a relayer's `fill`, or `_settle`'s unfilled branch) **and the
 recipient is a contract**, the adapter calls `IFastFillReceiver.onFastFill(orderId, token, amount,
@@ -326,10 +344,11 @@ but is strictly safer: because the transfer and the callback share one revertabl
 deterministically-failing hook can never strand the bridged funds — they always end delivered,
 redirected, or claimable. Hardening:
 
-- **Gas cap.** The call forwards exactly `callbackGasLimit`; the adapter first requires enough gas
-  remains (EIP-150 63/64) so a relayer cannot starve the user's signed budget (else `fill`/`settle`
-  reverts, forcing a retry). The limit is signed — in the order and the Permit2 witness — so the
-  relayer prices it into the base fee and a sponsor cannot alter it.
+- **Gas cap.** Creation rejects `callbackGasLimit > 5,000,000`. Delivery forwards exactly
+  `callbackGasLimit`; the adapter first requires enough gas remains (EIP-150 63/64) so a relayer
+  cannot starve the user's signed budget (else `fill`/`settle` reverts, forcing a retry). The limit is
+  signed — in the order and the Permit2 witness — so the relayer prices it into the base fee and a
+  sponsor cannot alter it.
 - **Return-bomb-safe.** The revert data is copied with a bounded length (enough for `RedirectFunds`),
   so a receiver cannot grief the relayer with a huge returndata payload.
 - **Reentrancy.** Delivery runs inside the existing `nonReentrant` fill/settle with effects written
@@ -345,18 +364,26 @@ transfer (no second callback), and the filler reimbursement is never hooked.
 ## 10. Configuration & admin
 
 **All chain config is immutable and lives in [`FastFillConfig`](../src/config/FastFillConfig.sol)** —
-a contract CREATE2-deployed to one address on every chain, holding a per-chain row
-`{supported, cctpDomain, lzEid, usdc, cctpTokenMessenger, usdt0Oft, usdt0Token}` baked as constants.
-Each adapter takes a single `config` argument (plus `owner`, `maxFeeRate`, all identical across
-chains), so the adapters are themselves CREATE2-deterministic. There are **no owner setters for
-addresses, domains, eids, or counterparts** — those are read from the registry at call time, keyed by
-`block.chainid` for the local chain and by the order's chain ids for the remote side. The counterpart
-is always `address(this)`; "does the remote chain exist" is `config.supported`.
+a contract CREATE2-deployed to one address on every chain. It exposes two lookups: `chainConfig(chainId)`
+for the per-chain transport row `{supported, cctpDomain, lzEid, usdc, cctpTokenMessenger}`, and
+`oftConfig(chainId, oftId)` for each OFT's `{oft, token}` pair — both baked as constants. Keeping the
+per-OFT addresses in their own lookup (keyed by `oftId`, see `OftId`) lets the registry scale to many
+OFTs without growing the struct returned on every resolve. Each adapter takes a single `config` argument
+(plus `owner`, `maxFeeRate`, and — for the OFT adapter — its `oftId`, all identical across chains), so
+the adapters are themselves CREATE2-deterministic. There are **no owner setters for addresses, domains,
+eids, or counterparts** — those are read from the registry at call time, keyed by `block.chainid` for the
+local chain and by the order's chain ids for the remote side. The counterpart is always `address(this)`;
+"does the remote chain exist" is `config.supported` (and, for OFTs, a non-zero `oftConfig` pair).
+
+**Onboarding a new OFT** is additive and needs no new adapter code: assign it the next `OftId`, add its
+per-chain `(oft, token)` rows to `FastFillConfig`, and call `OftAdapterFactory.deploy(oftId)` on each
+chain. The factory bakes the shared `config`/`owner`/`maxFeeRate` and salts by `oftId`, so the new
+adapter lands at one deterministic address everywhere with its own isolated pool. Adding a *chain* still
+means publishing a new registry version + adapters (a new deterministic address set).
 
 The adapter additionally **reads the local domain/eid/token live from the bridge contracts**
 (`MessageTransmitter.localDomain`, `Endpoint.eid`, `OFT.token`/`endpoint`) and reverts on any mismatch
-with the registry — so a wrong constant can't silently ship. Adding a chain means publishing a new
-registry version + adapters (a new deterministic address set).
+with the registry — so a wrong constant can't silently ship.
 
 Owner-gated (`Ownable`) surface is intentionally tiny: `setMaxFeeRate(rate)` and `setPaused(bool)`.
 Filling is **permissionless** — anyone may fill, since the `orderId` invariant makes a fill against a

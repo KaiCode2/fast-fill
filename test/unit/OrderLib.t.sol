@@ -31,6 +31,10 @@ contract OrderLibTest is Test {
         assertEq(OrderLib.hash(o), keccak256(abi.encode(o)));
     }
 
+    function testFuzz_hash_isKeccakAbiEncode(Order memory o) public pure {
+        assertEq(OrderLib.hash(o), keccak256(abi.encode(o)));
+    }
+
     function test_encodeDecode_roundtrip() public pure {
         Order memory o = _sample();
         Order memory d = OrderLib.decode(OrderLib.encode(o));

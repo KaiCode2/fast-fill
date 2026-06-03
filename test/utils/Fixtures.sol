@@ -7,7 +7,8 @@ import {CctpAdapter} from "../../src/adapters/CctpAdapter.sol";
 import {OftAdapter} from "../../src/adapters/OftAdapter.sol";
 import {Order, OrderLib} from "../../src/libraries/OrderLib.sol";
 import {AddressCast} from "../../src/libraries/AddressCast.sol";
-import {ChainConfig} from "../../src/interfaces/IFastFillConfig.sol";
+import {ChainConfig, OftDeployment} from "../../src/interfaces/IFastFillConfig.sol";
+import {OftId} from "../../src/libraries/OftId.sol";
 
 import {MockUSDC} from "../mocks/MockUSDC.sol";
 import {MockTokenMessengerV2} from "../mocks/MockTokenMessengerV2.sol";
@@ -36,6 +37,8 @@ abstract contract Fixtures is Test {
     uint32 internal constant DST_EID = 30_184;
 
     uint256 internal constant MAX_FEE_RATE = 5e15; // 0.5% cap (WAD)
+
+    uint8 internal constant OFT_ID = OftId.USDT0; // the OFT the default OFT fixtures model
 
     address internal owner = makeAddr("owner");
     address internal user = makeAddr("user");
@@ -78,12 +81,8 @@ abstract contract Fixtures is Test {
         transmitter = transmitterDst;
 
         cctpConfig = new MockFastFillConfig();
-        cctpConfig.set(
-            SRC_CHAIN, ChainConfig(true, SRC_DOMAIN, 0, address(usdc), address(messengerSrc), address(0), address(0))
-        );
-        cctpConfig.set(
-            DST_CHAIN, ChainConfig(true, DST_DOMAIN, 0, address(usdc), address(messengerDst), address(0), address(0))
-        );
+        cctpConfig.set(SRC_CHAIN, ChainConfig(true, SRC_DOMAIN, 0, address(usdc), address(messengerSrc)));
+        cctpConfig.set(DST_CHAIN, ChainConfig(true, DST_DOMAIN, 0, address(usdc), address(messengerDst)));
 
         cctp = new CctpAdapter(address(cctpConfig), owner, MAX_FEE_RATE);
         srcCctp = cctp;
@@ -91,20 +90,23 @@ abstract contract Fixtures is Test {
     }
 
     function _setUpOft() internal {
+        _setUpOftFor(OFT_ID);
+    }
+
+    /// @dev Set up the OFT fixtures for an arbitrary `oftId`, so tests can prove the adapter is
+    ///      generic across OFTs (not just USD₮0). One OFT/token instance plays the token on both
+    ///      chains (per-chain token distinctness is covered by the fork tests against real OFTs).
+    function _setUpOftFor(uint8 oftId) internal {
         lzEndpoint = new MockLzEndpoint(SRC_EID);
         oftToken = new MockOFT(address(lzEndpoint));
 
         oftConfig = new MockFastFillConfig();
-        // One OFT/token instance plays the token on both chains (per-chain token distinctness is
-        // covered by the OFT fork test against real USD₮0).
-        oftConfig.set(
-            SRC_CHAIN, ChainConfig(true, 0, SRC_EID, address(0), address(0), address(oftToken), address(oftToken))
-        );
-        oftConfig.set(
-            DST_CHAIN, ChainConfig(true, 0, DST_EID, address(0), address(0), address(oftToken), address(oftToken))
-        );
+        oftConfig.set(SRC_CHAIN, ChainConfig(true, 0, SRC_EID, address(0), address(0)));
+        oftConfig.set(DST_CHAIN, ChainConfig(true, 0, DST_EID, address(0), address(0)));
+        oftConfig.setOft(SRC_CHAIN, oftId, OftDeployment(address(oftToken), address(oftToken)));
+        oftConfig.setOft(DST_CHAIN, oftId, OftDeployment(address(oftToken), address(oftToken)));
 
-        oft = new OftAdapter(address(oftConfig), owner, MAX_FEE_RATE);
+        oft = new OftAdapter(address(oftConfig), owner, MAX_FEE_RATE, oftId);
         srcOft = oft;
         dstOft = oft;
     }

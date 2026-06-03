@@ -18,6 +18,10 @@ abstract contract ForkBase is Test {
         return _rpcUrl("ARB_RPC_URL", "arb-mainnet");
     }
 
+    function _baseRpcUrl() internal view returns (string memory) {
+        return _rpcUrl("BASE_RPC_URL", "base-mainnet");
+    }
+
     /// @dev Resolve an RPC: explicit env var wins; else build an Alchemy URL for `alchemyNetwork`.
     function _rpcUrl(string memory envVar, string memory alchemyNetwork) internal view returns (string memory) {
         string memory url = vm.envOr(envVar, string(""));
