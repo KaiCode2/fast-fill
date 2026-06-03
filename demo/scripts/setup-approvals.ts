@@ -42,7 +42,7 @@ const cctpAdapter = process.env.NEXT_PUBLIC_CCTP_ADAPTER as Address | undefined;
 const oftAdapter = process.env.NEXT_PUBLIC_OFT_ADAPTER as Address | undefined;
 
 function rpc(id: SupportedChainId): string {
-  const key = process.env.ALCHEMY_API_KEY ?? process.env.NEXT_PUBLIC_ALCHEMY_API_KEY;
+  const key = process.env.ALCHEMY_API_KEY;
   return key ? alchemyRpcUrl(id, key) : REGISTRY[id].chain.rpcUrls.default.http[0];
 }
 
