@@ -15,6 +15,16 @@ export const WAD = 10n ** 18n;
 /** Default per-adapter governance cap on the time-premium rate (0.5%), per the deploy script. */
 export const DEFAULT_MAX_FEE_RATE = 5n * 10n ** 15n;
 
+/**
+ * Pick a discountRate (WAD/s) so the time-premium decays *linearly* across the whole delivery
+ * window: at fillTime == startTime the rate equals exactly `maxFeeRate` (the cap), and it falls to
+ * zero at the expected delivery time. Integer division floors, so `rate * window <= maxFeeRate` and
+ * the cap never binds mid-window — i.e. no flat (capped) tail at the start of the curve.
+ */
+export function linearDiscountRate(deliveryWindow: bigint, maxFeeRate: bigint = DEFAULT_MAX_FEE_RATE): bigint {
+  return deliveryWindow > 0n ? maxFeeRate / deliveryWindow : 0n;
+}
+
 export function feeOf(args: {
   outputAmount: bigint;
   startTime: bigint;

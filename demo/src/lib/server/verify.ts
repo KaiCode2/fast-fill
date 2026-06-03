@@ -4,7 +4,7 @@ import { cctpAdapterAbi, oftAdapterAbi } from "@/lib/abis/generated";
 import { isSupportedChain, type SupportedChainId } from "@/lib/chains";
 import { addressToBytes32, BRIDGE_CCTP, orderIdOf, type Order } from "@/lib/order";
 import { getToken } from "@/lib/tokens";
-import { pub } from "./clients";
+import { getBlockWithRetry, pub } from "./clients";
 import { adapterAddressServer } from "./env";
 import { assertOrderAllowed } from "./guards";
 
@@ -100,7 +100,9 @@ export async function reconstructAndVerify(srcChainId: number, txHash: Hex): Pro
   const outputAmount = bridgeType === BRIDGE_CCTP ? inputAmount - (a[3] as bigint) : (a[3] as bigint);
 
   const symbol = bridgeType === BRIDGE_CCTP ? "USDC" : "USDT0";
-  const block = await client.getBlock({ blockNumber: receipt.blockNumber });
+  // Retry the block fetch: a load-balanced RPC can answer `eth_getBlockByNumber` from a node that
+  // hasn't yet indexed the just-mined block, even though it returned the receipt above.
+  const block = await getBlockWithRetry(client, receipt.blockNumber);
 
   const order: Order = {
     bridgeType,
