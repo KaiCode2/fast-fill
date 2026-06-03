@@ -1,10 +1,11 @@
 /**
- * One-time relayer setup: approve each destination adapter to pull the relayer's USDC / USD₮0 for
+ * One-time relayer setup: approve each destination adapter to pull the relayer's supported tokens for
  * fills, and print a balance/allowance report. Idempotent — skips tokens already approved.
  *
  *   pnpm setup:approvals
  *
- * Reads demo/.env.local (RELAYER_PRIVATE_KEY, ALCHEMY_API_KEY, NEXT_PUBLIC adapter addresses).
+ * Reads demo/.env.local (RELAYER_PRIVATE_KEY, ALCHEMY_API_KEY). Adapter addresses are the latest
+ * deterministic mainnet deployments documented in DEPLOYMENTS.md.
  */
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -38,8 +39,43 @@ if (!PK) {
   process.exit(1);
 }
 const account = privateKeyToAccount(PK);
-const cctpAdapter = process.env.NEXT_PUBLIC_CCTP_ADAPTER as Address | undefined;
-const oftAdapter = process.env.NEXT_PUBLIC_OFT_ADAPTER as Address | undefined;
+
+// Source: DEPLOYMENTS.md. These CREATE2-deterministic addresses are identical on every deployed chain.
+const CCTP_ADAPTER = "0xcceeB77d7E4FD660fFd8E501a29A58ec6133cF0E" as const satisfies Address;
+const OFT_ADAPTERS = {
+  USDT0: "0x45165aD55c5FADa4AEeD968469dB6e8e85b943Bf",
+  USDe: "0x27989367741A6662daeFd5CabeC4f40323461778",
+  sUSDe: "0x58E5315Ab8B975737d2655e838De12a2c48b497D",
+  ENA: "0x3291098E6F0e7C206DfB64c54E6D4927e42262b8",
+} as const satisfies Record<string, Address>;
+
+type Approval = {
+  token: Address;
+  spender: Address;
+  symbol: string;
+  decimals: number;
+  bridge: "CCTP" | "OFT";
+};
+
+const OFT_TOKENS: Partial<Record<SupportedChainId, Approval[]>> = {
+  42161: [
+    { token: "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9", spender: OFT_ADAPTERS.USDT0, symbol: "USDT0", decimals: 6, bridge: "OFT" },
+    { token: "0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34", spender: OFT_ADAPTERS.USDe, symbol: "USDe", decimals: 18, bridge: "OFT" },
+    { token: "0x211Cc4DD073734dA055fbF44a2b4667d5E5fE5d2", spender: OFT_ADAPTERS.sUSDe, symbol: "sUSDe", decimals: 18, bridge: "OFT" },
+    { token: "0x58538e6A46E07434d7E7375Bc268D3cb839C0133", spender: OFT_ADAPTERS.ENA, symbol: "ENA", decimals: 18, bridge: "OFT" },
+  ],
+  10: [
+    { token: "0x01bFF41798a0BcF287b996046Ca68b395DbC1071", spender: OFT_ADAPTERS.USDT0, symbol: "USDT0", decimals: 6, bridge: "OFT" },
+    { token: "0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34", spender: OFT_ADAPTERS.USDe, symbol: "USDe", decimals: 18, bridge: "OFT" },
+    { token: "0x211Cc4DD073734dA055fbF44a2b4667d5E5fE5d2", spender: OFT_ADAPTERS.sUSDe, symbol: "sUSDe", decimals: 18, bridge: "OFT" },
+    { token: "0x58538e6A46E07434d7E7375Bc268D3cb839C0133", spender: OFT_ADAPTERS.ENA, symbol: "ENA", decimals: 18, bridge: "OFT" },
+  ],
+  8453: [
+    { token: "0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34", spender: OFT_ADAPTERS.USDe, symbol: "USDe", decimals: 18, bridge: "OFT" },
+    { token: "0x211Cc4DD073734dA055fbF44a2b4667d5E5fE5d2", spender: OFT_ADAPTERS.sUSDe, symbol: "sUSDe", decimals: 18, bridge: "OFT" },
+    { token: "0x58538e6A46E07434d7E7375Bc268D3cb839C0133", spender: OFT_ADAPTERS.ENA, symbol: "ENA", decimals: 18, bridge: "OFT" },
+  ],
+};
 
 function rpc(id: SupportedChainId): string {
   const key = process.env.ALCHEMY_API_KEY;
@@ -60,23 +96,19 @@ async function run() {
     const native = await pub.getBalance({ address: account.address });
     console.log(`# ${meta.name} (${id}) — ${formatUnits(native, 18)} ETH`);
 
-    const pairs: { token: Address; spender?: Address; symbol: string; decimals: number }[] = [
-      { token: meta.usdc.address, spender: cctpAdapter, symbol: "USDC", decimals: meta.usdc.decimals },
+    const approvals: Approval[] = [
+      { token: meta.usdc.address, spender: CCTP_ADAPTER, symbol: "USDC", decimals: meta.usdc.decimals, bridge: "CCTP" },
+      ...(OFT_TOKENS[id] ?? []),
     ];
-    if (meta.usdt0) pairs.push({ token: meta.usdt0.address, spender: oftAdapter, symbol: "USDT0", decimals: meta.usdt0.decimals });
 
-    for (const { token, spender, symbol, decimals } of pairs) {
+    for (const { token, spender, symbol, decimals, bridge } of approvals) {
       const bal = (await pub.readContract({ address: token, abi: erc20Abi, functionName: "balanceOf", args: [account.address] })) as bigint;
-      if (!spender) {
-        console.log(`  ${symbol}: ${formatUnits(bal, decimals)} (no adapter configured — skipping approval)`);
-        continue;
-      }
       const allowance = (await pub.readContract({ address: token, abi: erc20Abi, functionName: "allowance", args: [account.address, spender] })) as bigint;
       if (allowance >= APPROVE_THRESHOLD) {
-        console.log(`  ${symbol}: ${formatUnits(bal, decimals)} — already approved`);
+        console.log(`  ${symbol} (${bridge}): ${formatUnits(bal, decimals)} — already approved`);
         continue;
       }
-      console.log(`  ${symbol}: ${formatUnits(bal, decimals)} — approving ${spender}…`);
+      console.log(`  ${symbol} (${bridge}): ${formatUnits(bal, decimals)} — approving ${spender}…`);
       const hash = await wallet.writeContract({ address: token, abi: erc20Abi, functionName: "approve", args: [spender, maxUint256] });
       await pub.waitForTransactionReceipt({ hash });
       console.log(`    approved (${hash})`);
