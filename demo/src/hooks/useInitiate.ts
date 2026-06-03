@@ -12,14 +12,7 @@ import { buildOrder, cctpInitiateArgs, oftInitiateArgs, outputAmountOf, type Bri
 import { PERMIT2, REGISTRY, type SupportedChainId } from "@/lib/chains";
 import { adapterAddress } from "@/lib/config";
 import { buildExtraOptions, DEFAULT_COMPOSE_GAS, DEFAULT_LZRECEIVE_GAS } from "@/lib/lzOptions";
-import {
-  addressToBytes32,
-  BRIDGE_CCTP,
-  encodeOrder,
-  orderIdOf,
-  serializeOrder,
-  type Order,
-} from "@/lib/order";
+import { addressToBytes32, BRIDGE_CCTP, encodeOrder, type Order } from "@/lib/order";
 import { buildOrderIntentTypedData, cctpBridgeParams, oftBridgeParams, randomPermit2Nonce } from "@/lib/permit2";
 import { buildPermit2612TypedData, splitSignature } from "@/lib/permit2612";
 import { getToken } from "@/lib/tokens";
@@ -124,24 +117,21 @@ export function useInitiate() {
     const events = parseEventLogs({ abi, eventName: "OrderCreated", logs: receipt.logs });
     const created = events.find((e) => (e.address as string).toLowerCase() === adapter.toLowerCase());
     if (!created) throw new Error("OrderCreated event not found in the transfer receipt");
-    const emittedOrderId = (created.args as { orderId: Hex }).orderId;
-    const nonce = (created.args as { nonce: bigint }).nonce;
-    const block = await client.getBlock({ blockNumber: receipt.blockNumber });
-
-    const order = buildOrder(p, address as Address, { nonce, startTime: block.timestamp });
-    const orderId = orderIdOf(order);
-    if (orderId.toLowerCase() !== emittedOrderId.toLowerCase()) {
-      throw new Error("Reconstructed orderId does not match the on-chain event.");
-    }
+    // The event carries the authoritative orderId the contract computed, so there's no need to
+    // refetch the block / reconstruct the order on the client. (Fetching the just-mined block by
+    // number races a load-balanced RPC and used to throw "Block at number … could not be found".)
+    // The backend independently re-derives and verifies the full order from the tx, so we simply
+    // hand off the tx hash.
+    const orderId = (created.args as { orderId: Hex }).orderId;
 
     setState({ phase: "handoff", message: "Notifying the relayer" });
     try {
-      await api.submitSelf({ txHash, srcChainId: p.srcChainId, forwarding, order: serializeOrder(order) });
+      await api.submitSelf({ txHash, srcChainId: p.srcChainId, forwarding });
     } catch (e) {
       console.warn("relayer handoff failed:", e);
     }
     setState({ phase: "done", message: "Submitted" });
-    return { orderId, order, srcTxHash: txHash };
+    return { orderId, srcTxHash: txHash };
   }
 
   async function ensureAllowance(token: Address, owner: Address, spender: Address, amount: bigint, chainId: SupportedChainId) {

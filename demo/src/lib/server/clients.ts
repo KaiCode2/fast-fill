@@ -1,5 +1,6 @@
 import "server-only";
 import {
+  BlockNotFoundError,
   createPublicClient,
   createWalletClient,
   http,
@@ -29,6 +30,34 @@ export function pub(chainId: SupportedChainId): PublicClient {
     });
   }
   return pubCache[chainId]!;
+}
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
+ * Fetch a block by number, tolerating the brief window where a load-balanced RPC has already
+ * served the receipt from a node ahead of the one answering `eth_getBlockByNumber`. viem turns a
+ * null block into a `BlockNotFoundError` ("Block at number … could not be found"); we retry only
+ * that with an escalating backoff and rethrow anything else.
+ */
+export async function getBlockWithRetry(
+  client: PublicClient,
+  blockNumber: bigint,
+  opts: { retries?: number; delayMs?: number } = {},
+) {
+  const retries = opts.retries ?? 6;
+  const delayMs = opts.delayMs ?? 400;
+  let lastErr: unknown;
+  for (let i = 0; i <= retries; i++) {
+    try {
+      return await client.getBlock({ blockNumber });
+    } catch (e) {
+      if (!(e instanceof BlockNotFoundError)) throw e;
+      lastErr = e;
+      if (i < retries) await sleep(delayMs * (i + 1));
+    }
+  }
+  throw lastErr;
 }
 
 export function wallet(chainId: SupportedChainId): WalletClient {

@@ -14,12 +14,16 @@ import type { VerifiedOrder } from "./verify";
 const ATTEST_TIMEOUT_MS = 30 * 60_000;
 const TERMINAL = new Set(["SETTLED", "FAILED", "ATTEST_TIMEOUT"]);
 
-let started = false;
+// One ticker process-wide, anchored on globalThis for the same reason the store is (Next may load
+// this module in more than one route bundle; we must not spin up a second interval per instance).
+const tickerState = ((globalThis as unknown as { __fastFillTicker?: { started: boolean } }).__fastFillTicker ??= {
+  started: false,
+});
 let ticking = false;
 
 export function ensureTicker(): void {
-  if (started) return;
-  started = true;
+  if (tickerState.started) return;
+  tickerState.started = true;
   setInterval(() => void tick(), 4_000);
 }
 

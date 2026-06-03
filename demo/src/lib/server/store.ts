@@ -35,9 +35,19 @@ export interface OrderJob {
   updatedAt: number;
 }
 
-const jobs = new Map<string, OrderJob>();
-const byTx = new Map<string, Hex>();
-const byPermit = new Map<string, Hex>();
+// Anchor the in-memory maps on globalThis so every route handler AND the relayer ticker share ONE
+// instance. Next.js can evaluate a server module more than once (separate route bundles, dev
+// recompiles); without this, /api/orders would read a different (empty) store than the one
+// /api/bridge/* and the ticker write to — leaving order status stuck at "Awaiting fill" forever.
+const g = globalThis as unknown as {
+  __fastFillStore?: { jobs: Map<string, OrderJob>; byTx: Map<string, Hex>; byPermit: Map<string, Hex> };
+};
+const store = (g.__fastFillStore ??= {
+  jobs: new Map<string, OrderJob>(),
+  byTx: new Map<string, Hex>(),
+  byPermit: new Map<string, Hex>(),
+});
+const { jobs, byTx, byPermit } = store;
 
 const txKey = (chainId: number, txHash: string) => `${chainId}:${txHash.toLowerCase()}`;
 

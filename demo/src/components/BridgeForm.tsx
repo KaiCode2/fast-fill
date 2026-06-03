@@ -5,6 +5,7 @@ import { formatUnits, isAddress, parseUnits, type Address } from "viem";
 import { useAccount } from "wagmi";
 import type { SubmitMode } from "@/lib/api";
 import {
+  deliveryWindowFor,
   FINALITY_FAST,
   FINALITY_FINALIZED,
   outputAmountOf,
@@ -14,6 +15,7 @@ import {
 import { REGISTRY, SUPPORTED_CHAIN_IDS, type SupportedChainId, type TokenSymbol } from "@/lib/chains";
 import { contractsConfigured, maxUsdPerTransfer } from "@/lib/config";
 import { fmtAmount } from "@/lib/format";
+import { DEFAULT_MAX_FEE_RATE, linearDiscountRate } from "@/lib/pricing";
 import { bridgeTypeForToken, chainsForToken, destinationsFor, getToken, isRouteSupported } from "@/lib/tokens";
 import { BRIDGE_CCTP } from "@/lib/order";
 import { useBalances } from "@/hooks/useBalances";
@@ -22,9 +24,9 @@ import type { TransferRecord } from "@/hooks/useTransfers";
 import { FeePreview } from "./FeePreview";
 
 const MODES: { key: SubmitMode; label: string; hint: string }[] = [
-  { key: "standard", label: "Standard", hint: "Approve + send yourself" },
-  { key: "permit2612", label: "1-tx (2612)", hint: "Permit + send in one tx" },
-  { key: "permit2", label: "Gasless (Permit2)", hint: "Sign only — relayer submits" },
+  { key: "standard", label: "Approval Tx", hint: "Approve + send yourself" },
+  { key: "permit2612", label: "Permit (ERC-2612)", hint: "Permit + send in one tx" },
+  { key: "permit2", label: "Permit2", hint: "Sign only — relayer submits" },
 ];
 
 function tryParseUnits(s: string, decimals: number): bigint | null {
@@ -48,28 +50,29 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
   const [sendToSelf, setSendToSelf] = useState(true);
   const [recipientStr, setRecipientStr] = useState("");
   const [finality, setFinality] = useState<number>(FINALITY_FAST);
-  const [forwarding, setForwarding] = useState(true);
-  const [mode, setMode] = useState<SubmitMode>("standard");
+  const [mode, setMode] = useState<SubmitMode>("permit2612");
   const [advanced, setAdvanced] = useState(false);
   const [maxFeeStr, setMaxFeeStr] = useState(""); // empty → auto
-  const [windowStr, setWindowStr] = useState("600");
-  const [discountRateStr, setDiscountRateStr] = useState("10000000000000"); // 1e13 WAD/s
+  const [windowStr, setWindowStr] = useState(""); // empty → auto (from fast/slow)
+  const [discountRateStr, setDiscountRateStr] = useState(""); // empty → auto (linear over the window)
   const [baseFeeStr, setBaseFeeStr] = useState("0");
 
   const bridgeType = bridgeTypeForToken(token);
   const decimals = getToken(src, token).decimals;
 
-  // Keep the route valid as token/src change.
-  useEffect(() => {
-    if (!isRouteSupported(token, src, dst)) {
-      const chains = chainsForToken(token);
+  // Switching token must also move the route onto chains that support it (USD₮0 is Arb/Op only).
+  // Done in the click handler — batched with setToken — so we never render an unsupported
+  // (src, token) pair, which would throw in getToken() before any effect could correct it.
+  function onSelectToken(t: TokenSymbol) {
+    if (!isRouteSupported(t, src, dst)) {
+      const chains = chainsForToken(t);
       const ns = chains.includes(src) ? src : chains[0];
-      const nd = chains.find((c) => c !== ns)!;
+      const nd = destinationsFor(t, ns)[0] ?? chains.find((c) => c !== ns)!;
       setSrc(ns);
       setDst(nd);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token]);
+    setToken(t);
+  }
 
   useEffect(() => {
     if (src === dst || !isRouteSupported(token, src, dst)) {
@@ -96,8 +99,13 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
   }, [bridgeType, finality, maxFeeStr, decimals, amount]);
 
   const baseFee = tryParseUnits(baseFeeStr, decimals) ?? 0n;
-  const deliveryWindow = BigInt(windowStr || "0");
-  const discountRate = BigInt(discountRateStr || "0");
+  // Delivery window keys off the bridge speed (CCTP fast vs finalized); the discount rate is derived
+  // so the premium decays linearly to zero across that window (no flat/capped tail). Both stay
+  // overridable from Advanced.
+  const autoWindow = deliveryWindowFor(bridgeType, finality);
+  const deliveryWindow = windowStr ? BigInt(windowStr) : autoWindow;
+  const autoDiscountRate = linearDiscountRate(deliveryWindow, DEFAULT_MAX_FEE_RATE);
+  const discountRate = discountRateStr ? BigInt(discountRateStr) : autoDiscountRate;
 
   const params: BridgeParams | null =
     amount && recipient
@@ -127,7 +135,8 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
   async function onSubmit() {
     if (!params) return;
     try {
-      const res = await submit(params, mode, forwarding);
+      // Settlement (CCTP minting) is always the relayer network's responsibility now — forwarding on.
+      const res = await submit(params, mode, true);
       onStarted({
         orderId: res.orderId,
         mode,
@@ -139,7 +148,7 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
         outputAmount: outputAmount.toString(),
         recipient: recipient!,
         srcTxHash: res.srcTxHash,
-        forwarding,
+        forwarding: true,
         createdAt: Date.now(),
       });
     } catch {
@@ -152,7 +161,7 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
       {/* Token */}
       <div className="flex gap-2 rounded-lg border border-edge bg-ink p-1">
         {(["USDC", "USDT0"] as TokenSymbol[]).map((t) => (
-          <button key={t} onClick={() => setToken(t)} className={`seg ${token === t ? "seg-on" : "seg-off"}`}>
+          <button key={t} onClick={() => onSelectToken(t)} className={`seg ${token === t ? "seg-on" : "seg-off"}`}>
             {t}
           </button>
         ))}
@@ -229,7 +238,7 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
         />
       </div>
 
-      {/* CCTP-only: speed + forwarding */}
+      {/* CCTP-only: speed + (relayer-managed) settlement */}
       {bridgeType === BRIDGE_CCTP && (
         <div className="grid grid-cols-2 gap-3">
           <div>
@@ -244,10 +253,13 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
             </div>
           </div>
           <div>
-            <label className="label">CCTP forwarding</label>
-            <label className="flex h-[38px] items-center gap-2 rounded-lg border border-edge bg-ink px-3 text-sm">
-              <input type="checkbox" checked={forwarding} onChange={(e) => setForwarding(e.target.checked)} />
-              <span className="text-slate-300">auto-settle for me</span>
+            <label className="label">CCTP settlement</label>
+            <label
+              className="flex h-[38px] cursor-not-allowed items-center gap-2 rounded-lg border border-edge bg-ink px-3 text-sm opacity-60"
+              title="Optimistic fill and USDC minting are both handled by the relayer network."
+            >
+              <input type="checkbox" checked readOnly disabled />
+              <span className="text-slate-300">relayer-managed</span>
             </label>
           </div>
         </div>
@@ -284,11 +296,21 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
             )}
             <div>
               <label className="label">delivery window (s)</label>
-              <input className="input font-mono" value={windowStr} onChange={(e) => setWindowStr(e.target.value.replace(/\D/g, ""))} />
+              <input
+                className="input font-mono"
+                placeholder={`${autoWindow} (auto: ${finality === FINALITY_FINALIZED ? "finalized" : "fast"})`}
+                value={windowStr}
+                onChange={(e) => setWindowStr(e.target.value.replace(/\D/g, ""))}
+              />
             </div>
             <div>
               <label className="label">discountRate (WAD/s)</label>
-              <input className="input font-mono" value={discountRateStr} onChange={(e) => setDiscountRateStr(e.target.value.replace(/\D/g, ""))} />
+              <input
+                className="input font-mono"
+                placeholder={`${autoDiscountRate} (auto: linear)`}
+                value={discountRateStr}
+                onChange={(e) => setDiscountRateStr(e.target.value.replace(/\D/g, ""))}
+              />
             </div>
             <div>
               <label className="label">baseFee ({token})</label>
@@ -298,13 +320,16 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
         )}
       </div>
 
-      {/* Submit modes */}
-      <div className="flex gap-2 rounded-lg border border-edge bg-ink p-1">
-        {MODES.map((m) => (
-          <button key={m.key} onClick={() => setMode(m.key)} className={`seg ${mode === m.key ? "seg-on" : "seg-off"}`} title={m.hint}>
-            {m.label}
-          </button>
-        ))}
+      {/* Approval method */}
+      <div>
+        <label className="label">Approval method</label>
+        <div className="flex gap-2 rounded-lg border border-edge bg-ink p-1">
+          {MODES.map((m) => (
+            <button key={m.key} onClick={() => setMode(m.key)} className={`seg ${mode === m.key ? "seg-on" : "seg-off"}`} title={m.hint}>
+              {m.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Submit */}

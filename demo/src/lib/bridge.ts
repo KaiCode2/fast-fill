@@ -7,6 +7,24 @@ import { getToken } from "./tokens";
 export const FINALITY_FAST = 1000;
 export const FINALITY_FINALIZED = 2000;
 
+/**
+ * Delivery-window presets — how long the *underlying* bridge takes to deliver to the recipient if
+ * nobody fast-fills. The premium decays to zero across this window, so it is the time a fast fill
+ * actually saves. Sourced from Circle's CCTP V2 finality docs for Arbitrum / OP / Base:
+ *   - Fast (soft finality, minFinalityThreshold ≤ 1000): ~8s; we pad to ~1 min for attestation + mint.
+ *   - Standard (hard finality, minFinalityThreshold ≥ 2000): ~15–19 min; we use 19 min.
+ * LayerZero (USDT0/OFT) delivery is typically a couple of minutes.
+ */
+export const CCTP_FAST_DELIVERY_SECS = 60n;
+export const CCTP_STANDARD_DELIVERY_SECS = 1140n; // 19 min
+export const OFT_DELIVERY_SECS = 180n; // ~3 min
+
+/** Default delivery window for a transfer: CCTP keys off fast/finalized; OFT is a flat estimate. */
+export function deliveryWindowFor(bridgeType: number, finality: number): bigint {
+  if (bridgeType !== BRIDGE_CCTP) return OFT_DELIVERY_SECS;
+  return finality === FINALITY_FINALIZED ? CCTP_STANDARD_DELIVERY_SECS : CCTP_FAST_DELIVERY_SECS;
+}
+
 /** All the user-tunable inputs for one transfer. */
 export interface BridgeParams {
   token: TokenSymbol;
