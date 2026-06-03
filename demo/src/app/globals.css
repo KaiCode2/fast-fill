@@ -1,0 +1,45 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+  body {
+    background-image: radial-gradient(1200px 600px at 80% -10%, rgba(91, 140, 255, 0.12), transparent 60%);
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded-2xl border border-edge bg-panel/80 p-5 shadow-lg shadow-black/30 backdrop-blur;
+  }
+  .label {
+    @apply mb-1 block text-xs font-medium uppercase tracking-wide text-slate-400;
+  }
+  .input {
+    @apply w-full rounded-lg border border-edge bg-ink px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-accent;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply btn bg-accent text-ink hover:brightness-110;
+  }
+  .btn-ghost {
+    @apply btn border border-edge bg-transparent text-slate-200 hover:bg-edge/60;
+  }
+  .pill {
+    @apply inline-flex items-center gap-1 rounded-full border border-edge px-2.5 py-0.5 text-xs font-medium;
+  }
+  .seg {
+    @apply flex-1 rounded-md px-3 py-1.5 text-center text-sm font-medium transition;
+  }
+  .seg-on {
+    @apply bg-accent text-ink;
+  }
+  .seg-off {
+    @apply text-slate-400 hover:text-slate-200;
+  }
+}
