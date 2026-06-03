@@ -4,6 +4,7 @@ pragma solidity ^0.8.26;
 import {ForkBase} from "./ForkBase.sol";
 import {Addresses} from "../../script/config/Addresses.sol";
 import {OftAdapter} from "../../src/adapters/OftAdapter.sol";
+import {OftId} from "../../src/libraries/OftId.sol";
 import {FastFillConfig} from "../../src/config/FastFillConfig.sol";
 import {Order, OrderLib} from "../../src/libraries/OrderLib.sol";
 import {AddressCast} from "../../src/libraries/AddressCast.sol";
@@ -80,7 +81,7 @@ contract OftForkE2ETest is ForkBase {
         if (!_forkOrSkip(_opRpcUrl())) return false;
         // Deploy our adapter on the Optimism fork against the real config (reads the real OFT +
         // endpoint live). No wiring: the counterpart is address(this) and routing comes from config.
-        adapter = new OftAdapter(address(new FastFillConfig()), address(this), 5e15);
+        adapter = new OftAdapter(address(new FastFillConfig()), address(this), 5e15, OftId.USDT0);
         return true;
     }
 

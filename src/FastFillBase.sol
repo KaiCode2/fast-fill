@@ -2,9 +2,9 @@
 pragma solidity ^0.8.26;
 
 import {Ownable} from "solady/auth/Ownable.sol";
-import {ReentrancyGuard} from "solady/utils/ReentrancyGuard.sol";
 import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 import {Multicallable} from "solady/utils/Multicallable.sol";
+import {LibCall} from "solady/utils/LibCall.sol";
 
 import {IFastFill, FillStatus, OrderRecord, CallbackResult} from "./interfaces/IFastFill.sol";
 import {IFastFillReceiver} from "./interfaces/IFastFillReceiver.sol";
@@ -14,6 +14,7 @@ import {Order, OrderLib} from "./libraries/OrderLib.sol";
 import {PricingLib} from "./libraries/PricingLib.sol";
 import {PermitLib} from "./libraries/PermitLib.sol";
 import {AddressCast} from "./libraries/AddressCast.sol";
+import {TransientReentrancyGuard} from "./utils/TransientReentrancyGuard.sol";
 
 /// @title  FastFillBase
 /// @notice Shared lifecycle for an optimistic cross-chain fill protocol that wraps message-based
@@ -27,7 +28,7 @@ import {AddressCast} from "./libraries/AddressCast.sol";
 ///         never reimbursed. Fills are therefore trustless: a bad filler can only lose its own
 ///         funds. The destination contract's token balance is the reimbursement pool — there is no
 ///         separate escrow, and every order settles exactly once.
-abstract contract FastFillBase is IFastFill, Ownable, ReentrancyGuard, Multicallable {
+abstract contract FastFillBase is IFastFill, Ownable, TransientReentrancyGuard, Multicallable {
     using OrderLib for Order;
     using AddressCast for bytes32;
     using AddressCast for address;
@@ -35,6 +36,12 @@ abstract contract FastFillBase is IFastFill, Ownable, ReentrancyGuard, Multicall
     /// @notice Uniswap Permit2 — same address on every chain — used for signature-based pulls where
     ///         the funds come from a signer that is not `msg.sender` (sponsored / intent flows).
     address public constant PERMIT2 = 0x000000000022D473030F116dDEE9F6B43aC78BA3;
+
+    /// @notice Maximum gas that an order may request for destination execution.
+    uint64 public constant MAX_CALLBACK_GAS_LIMIT = 5_000_000;
+
+    /// @dev `RedirectFunds(address)` revert data: selector (4 bytes) + encoded address (32 bytes).
+    uint16 private constant CALLBACK_RETURNDATA_LIMIT = 0x24;
 
     // ---------------------------------------------------------------------------------------------
     // Errors
@@ -52,6 +59,7 @@ abstract contract FastFillBase is IFastFill, Ownable, ReentrancyGuard, Multicall
     error UnsupportedChain(uint32 chainId);
     error NotSourceChain(uint32 srcChainId);
     error ZeroRecipient();
+    error InvalidCallbackGasLimit(uint64 callbackGasLimit, uint64 maxCallbackGasLimit);
     error InsufficientCallbackGas(uint256 available, uint256 callbackGasLimit);
     error OnlySelf();
 
@@ -289,27 +297,13 @@ abstract contract FastFillBase is IFastFill, Ownable, ReentrancyGuard, Multicall
         if (msg.sender != address(this)) revert OnlySelf();
         SafeTransferLib.safeTransfer(token, recipient, amount);
         bytes memory cd = abi.encodeCall(IFastFillReceiver.onFastFill, (orderId, token, amount, hookData));
-        bool ok;
-        bytes memory ret;
-        assembly {
-            ok := call(gasLimit, recipient, 0, add(cd, 0x20), mload(cd), 0x00, 0x00)
-            let size := returndatasize()
-            if gt(size, 0x24) { size := 0x24 } // cap at RedirectFunds(address): selector(4) + word(32)
-            ret := mload(0x40)
-            mstore(ret, size)
-            returndatacopy(add(ret, 0x20), 0x00, size)
-            mstore(0x40, add(ret, and(add(add(size, 0x20), 0x1f), not(0x1f))))
-        }
-        if (!ok) {
-            assembly {
-                revert(add(ret, 0x20), mload(ret))
-            }
-        }
+        (bool ok,, bytes memory ret) = LibCall.tryCall(recipient, 0, gasLimit, CALLBACK_RETURNDATA_LIMIT, cd);
+        if (!ok) LibCall.bubbleUpRevert(ret);
     }
 
     /// @dev Decode a `RedirectFunds(address)` revert (selector + 32-byte address = 36 bytes); else 0.
     function _parseRedirect(bytes memory reason) private pure returns (address dest) {
-        if (reason.length == 0x24) {
+        if (reason.length == CALLBACK_RETURNDATA_LIMIT) {
             bytes32 selWord;
             bytes32 addrWord;
             assembly {
@@ -455,7 +449,10 @@ abstract contract FastFillBase is IFastFill, Ownable, ReentrancyGuard, Multicall
         // The flat baseFee must leave the recipient something at fill; the combined fee is additionally
         // capped at outputAmount inside PricingLib.
         if (order.baseFee >= order.outputAmount) revert InvalidBaseFee(order.baseFee, order.outputAmount);
-        if (order.recipient == bytes32(0)) revert ZeroRecipient();
+        if (order.recipient.toAddress() == address(0)) revert ZeroRecipient();
+        if (order.callbackGasLimit > MAX_CALLBACK_GAS_LIMIT) {
+            revert InvalidCallbackGasLimit(order.callbackGasLimit, MAX_CALLBACK_GAS_LIMIT);
+        }
     }
 
     // ---------------------------------------------------------------------------------------------

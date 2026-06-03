@@ -88,25 +88,27 @@ src/
     FastFillConfig.sol       immutable CREATE2 chain registry (the single source of chain config)
   adapters/
     CctpAdapter.sol          initiateCCTP[For]() + settle(message, attestation)
-    OftAdapter.sol           initiateOFT[For]() + lzCompose()  [ILayerZeroComposer]
+    OftAdapter.sol           initiateOFT[For]() + lzCompose()  [ILayerZeroComposer]; one instance per OFT (oftId)
+    OftAdapterFactory.sol    deploy(oftId) -> a deterministic OftAdapter per OFT (shared config/owner/fee baked in)
   libraries/
     OrderLib.sol             Order struct + keccak256(abi.encode) hashing + encode/decode
     PricingLib.sol           the fee curve (WAD, capped, monotonic)
     PermitLib.sol            Permit2 order-intent / fill-auth witnesses + type strings
     BurnMessageV2Lib.sol     parse a CCTP v2 message (sourceDomain/messageSender/mintRecipient/...)
     OFTComposeMsgCodec.sol   decode a LayerZero OFT composed message
+    OftId.sol                stable per-OFT ids (USD₮0=0, USDe=1, sUSDe=2, ENA=3, USDtb=4)
     AddressCast.sol          checked bytes32 <-> address
   interfaces/
     cctp/                    hand-written ^0.8 ITokenMessengerV2 / IMessageTransmitterV2
     layerzero/               hand-written ILayerZeroComposer / IOFT / ILayerZeroEndpointV2
     permit2/                 ISignatureTransfer (Permit2)
     IERC20Permit.sol         EIP-2612
-    IFastFillConfig.sol      ChainConfig + registry interface
+    IFastFillConfig.sol      ChainConfig + OftDeployment + registry interface (chainConfig + oftConfig)
     IFastFill.sol            shared external surface + events + order record types
     IFastFillReceiver.sol    onFastFill destination-execution callback (+ RedirectFunds)
 ```
 
-The **CCTP** and **OFT** adapters are **deployed at separate addresses**, so the USDC reimbursement pool and the OFT-token pool are physically isolated — a decode/auth bug in one adapter can never reach the other's funds. Each adapter is **bidirectional**: it initiates outbound transfers and settles inbound ones, and is deployed on every supported chain.
+The **CCTP** adapter and each **OFT** adapter are **deployed at separate addresses**. The OFT adapter is generic — parameterized by an `oftId` — so there is one instance per OFT (USD₮0, USDe, sUSDe, ENA, USDtb), each minted by `OftAdapterFactory` at a deterministic, cross-chain-stable address. Every token's reimbursement pool is therefore physically isolated — a decode/auth bug in one adapter can never reach another's funds. Each adapter is **bidirectional**: it initiates outbound transfers and settles inbound ones, and is deployed on every supported chain.
 
 ### Settlement authentication
 
@@ -126,7 +128,7 @@ forge test --mt invariant -vvv
 FOUNDRY_PROFILE=ci forge test
 ```
 
-90 tests in total: pure-library unit + fuzz (incl. the flat-base-fee + time-decay pricing curve), full CCTP & OFT lifecycle, races, adversarial, invariants (16k+ calls, now fuzzing the base fee too), gasless approval flows, **destination executions** (success / redirect / claimable / reentrancy / return-bomb / gas-budget / atomic claw-back, both bridges), gas benchmarks (`test/gas/` — see [docs/GAS.md](docs/GAS.md)), and **mainnet-fork** checks that run automatically when an RPC is available (otherwise they self-skip) — including an **Optimism fork end-to-end against the real USD₮0 OFT** (proves USD₮0 forwards our compose, mints, settles) and a **fork against the real Permit2** (proves a sponsored intent's signature + witness binding, including rejected recipient- and bridge-mode-tampering). Dependencies (git submodules under `lib/`): `forge-std`, `solady`.
+114 tests in total: pure-library unit + fuzz (incl. the flat-base-fee + time-decay pricing curve), full CCTP & OFT lifecycle (the entire OFT lifecycle is **re-run verbatim against a non-USD₮0 adapter** to prove it is OFT-agnostic), the **OFT factory** (deterministic per-`oftId` addresses + pool isolation), races, adversarial, invariants (16k+ calls, now fuzzing the base fee too), gasless approval flows, **destination executions** (success / redirect / claimable / reentrancy / return-bomb / gas-budget / atomic claw-back, both bridges), gas benchmarks (`test/gas/` — see [docs/GAS.md](docs/GAS.md)), and **mainnet-fork** checks that run automatically when an RPC is available (otherwise they self-skip) — including an **Optimism fork end-to-end against the real USD₮0 OFT** (proves USD₮0 forwards our compose, mints, settles), **live fact checks for the Ethena OFTs** (USDe / sUSDe / ENA / USDtb — `OFT.token()`/`endpoint()`/topology/decimals verified against the registry on Ethereum, Optimism, Arbitrum, and Base), and a **fork against the real Permit2** (proves a sponsored intent's signature + witness binding, including rejected recipient- and bridge-mode-tampering). Dependencies (git submodules under `lib/`): `forge-std`, `solady`.
 
 ### A note on dependencies
 
@@ -136,19 +138,22 @@ CCTP's reference contracts are pinned to `solidity 0.7.6` (not importable into t
 ALCHEMY_API_KEY=... FOUNDRY_PROFILE=fork forge test --match-path "test/fork/**" -vvv
 ```
 
-`test/fork/CctpForkE2E.t.sol` does a **real** `depositForBurnWithHook` burn on a mainnet fork and validates our message parser + order encoding against the real emitted message — the dry-run that de-risked the live CCTP demo. `test/fork/OftForkE2E.t.sol` does the OFT analogue on an **Optimism** fork: it deploys the adapter against the real USD₮0 OFT + endpoint, drives the real `oft.lzReceive` (which mints real USD₮0 to the adapter and forwards our compose), then drives the real `endpoint.lzCompose` into the adapter to settle — proving the destination path before any live funds. Resolve OP/ARB RPCs from `OP_RPC_URL`/`ARB_RPC_URL` or `ALCHEMY_API_KEY`.
+`test/fork/CctpForkE2E.t.sol` does a **real** `depositForBurnWithHook` burn on a mainnet fork and validates our message parser + order encoding against the real emitted message — the dry-run that de-risked the live CCTP demo. `test/fork/OftForkE2E.t.sol` does the OFT analogue on an **Optimism** fork: it deploys the adapter against the real USD₮0 OFT + endpoint, drives the real `oft.lzReceive` (which mints real USD₮0 to the adapter and forwards our compose), then drives the real `endpoint.lzCompose` into the adapter to settle — proving the destination path before any live funds. `test/fork/EthenaOftFork.t.sol` verifies the registry's USDe / sUSDe / ENA / USDtb rows against the **live** OFTs on Ethereum, Optimism, Arbitrum, and Base (`OFT.token()`/`endpoint()`, native-vs-adapter topology, decimals) — the address-correctness gate for the new OFTs. Resolve OP/ARB/Base RPCs from `OP_RPC_URL`/`ARB_RPC_URL`/`BASE_RPC_URL` or `ALCHEMY_API_KEY`.
 
 ## Deploy
 
-All chain-specific data (CCTP/LZ addresses, domains, eids, per-chain USDC and USD₮0 tokens) lives in one immutable [`FastFillConfig`](src/config/FastFillConfig.sol) registry. Deploy it **once via CREATE2** so it lands at the same address on every chain, then deploy each adapter with that address — **there is no per-counterpart wiring to get wrong.**
+All chain-specific data (CCTP/LZ addresses, domains, eids, per-chain USDC, and each OFT's per-chain `(oft, token)` for USD₮0 / USDe / sUSDe / ENA / USDtb) lives in one immutable [`FastFillConfig`](src/config/FastFillConfig.sol) registry. Deploy it **once via CREATE2** so it lands at the same address on every chain, then deploy each adapter with that address — **there is no per-counterpart wiring to get wrong.**
 
 ```bash
 # 1. Deploy the registry (same EOA + salt on every chain => same address everywhere)
 forge script script/DeployFastFillConfig.s.sol --rpc-url $RPC --broadcast
 
-# 2. Deploy the adapters against it (CONFIG is identical on every chain, so are the adapters)
-CONFIG=0x... forge script script/DeployCctpAdapter.s.sol --rpc-url $RPC --broadcast
-CONFIG=0x... forge script script/DeployOftAdapter.s.sol  --rpc-url $RPC --broadcast
+# 2. Deploy the CCTP adapter + the OFT factory against it (CONFIG identical on every chain)
+CONFIG=0x... forge script script/DeployCctpAdapter.s.sol        --rpc-url $RPC --broadcast
+CONFIG=0x... forge script script/DeployOftAdapterFactory.s.sol  --rpc-url $RPC --broadcast
+
+# 3. Deploy the configured OFT adapters via the factory (USD₮0, sUSDe, USDe, ENA)
+FACTORY=0x... forge script script/DeployOftAdapter.s.sol --rpc-url $RPC --broadcast
 ```
 
 Because the registry, the owner, and the fee cap are identical across chains, each adapter is **CREATE2-deterministic** — the same address everywhere — so the counterpart adapter is simply `address(this)`. The adapter resolves every value from the registry at call time, and **cross-checks the local domain/eid/token against the live bridge contracts on each use**, reverting on any mismatch (a wrong constant cannot silently ship). Adding a chain means publishing a new registry version; there are no owner setters for addresses. The canonical addresses are in [`FastFillConfig`](src/config/FastFillConfig.sol) (with a `script/config/Addresses.sol` mirror used only by tests/scripts, bound to the registry by a consistency test). A worked CCTP example is in [DEMO.md](DEMO.md).
@@ -162,7 +167,9 @@ Both adapters support signature-based funding so a user (or relayer) need only *
 
 ## Destination executions
 
-An order can carry **`hookData`** (and a user-signed **`callbackGasLimit`**): when the funds are delivered — whether by a relayer's optimistic fill or by the bridge settling — a recipient *contract* receives an [`IFastFillReceiver.onFastFill(orderId, token, amount, hookData)`](src/interfaces/IFastFillReceiver.sol) callback in the **same atomic frame** as the transfer. Empty `hookData` (or an EOA recipient) ⇒ funds delivered, no call. The same interface serves both adapters.
+Initiate calls take `recipient` as `bytes32` for bridge compatibility, but it must be the canonical bytes32 form of an EVM address (`address.toBytes32()`, upper 12 bytes zero) and cannot be zero.
+
+An order can carry **`hookData`** (and a user-signed **`callbackGasLimit`**, capped at **5,000,000 gas**): when the funds are delivered — whether by a relayer's optimistic fill or by the bridge settling — a recipient *contract* receives an [`IFastFillReceiver.onFastFill(orderId, token, amount, hookData)`](src/interfaces/IFastFillReceiver.sol) callback in the **same atomic frame** as the transfer. Empty `hookData` (or an EOA recipient) ⇒ funds delivered, no call. The same interface serves both adapters.
 
 The callback is **gas-capped** (`{gas: callbackGasLimit}`, return-bomb-safe, behind the existing `nonReentrant` guard — a receiver cannot re-enter or grief the fill), and **funds are never stuck**: the receiver's own revert data governs the fallback.
 

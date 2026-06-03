@@ -5,6 +5,7 @@ import {Fixtures} from "../utils/Fixtures.sol";
 import {CctpMessageBuilder} from "../utils/CctpMessageBuilder.sol";
 import {Order, OrderLib, Execution} from "../../src/libraries/OrderLib.sol";
 import {PricingLib} from "../../src/libraries/PricingLib.sol";
+import {AddressCast} from "../../src/libraries/AddressCast.sol";
 import {FastFillBase} from "../../src/FastFillBase.sol";
 import {CctpAdapter} from "../../src/adapters/CctpAdapter.sol";
 import {FillStatus, OrderRecord} from "../../src/interfaces/IFastFill.sol";
@@ -15,6 +16,7 @@ contract CctpLifecycleTest is Fixtures {
     uint256 constant MAX_FEE = 1e6;
     uint256 constant RATE = 1e13; // 0.001% / sec
     uint64 constant WINDOW = 100;
+    bytes internal constant HOOK = hex"feed";
 
     function setUp() public {
         vm.warp(1_000_000);
@@ -75,6 +77,74 @@ contract CctpLifecycleTest is Fixtures {
         assertEq(tokenMessenger.lastDestinationDomain(), DST_DOMAIN, "destination domain");
         assertEq(order.outputAmount, INPUT - MAX_FEE, "outputAmount");
         assertEq(usdc.balanceOf(user), 0, "user funds pulled");
+    }
+
+    function test_initiate_malformedRecipient_revertsBeforeBurn() public {
+        bytes32 malformed = bytes32(uint256(uint160(recipient)) | (uint256(1) << 160));
+        usdc.mint(user, INPUT);
+
+        vm.chainId(SRC_CHAIN);
+        vm.startPrank(user);
+        usdc.approve(address(srcCctp), INPUT);
+        vm.expectRevert(abi.encodeWithSelector(AddressCast.InvalidAddress.selector, malformed));
+        srcCctp.initiateCCTP(DST_CHAIN, malformed, INPUT, MAX_FEE, 1000, WINDOW, RATE, 0, Execution(0, ""));
+        vm.stopPrank();
+
+        assertEq(tokenMessenger.burnCount(), 0, "no CCTP burn");
+        assertEq(usdc.balanceOf(user), INPUT, "funds not pulled");
+    }
+
+    function test_initiate_zeroRecipient_revertsBeforeBurn() public {
+        usdc.mint(user, INPUT);
+
+        vm.chainId(SRC_CHAIN);
+        vm.startPrank(user);
+        usdc.approve(address(srcCctp), INPUT);
+        vm.expectRevert(FastFillBase.ZeroRecipient.selector);
+        srcCctp.initiateCCTP(DST_CHAIN, bytes32(0), INPUT, MAX_FEE, 1000, WINDOW, RATE, 0, Execution(0, ""));
+        vm.stopPrank();
+
+        assertEq(tokenMessenger.burnCount(), 0, "no CCTP burn");
+        assertEq(usdc.balanceOf(user), INPUT, "funds not pulled");
+    }
+
+    function test_initiate_callbackGasLimitTooHigh_revertsBeforeBurn() public {
+        uint64 maxGas = srcCctp.MAX_CALLBACK_GAS_LIMIT();
+        uint64 tooHigh = maxGas + 1;
+        usdc.mint(user, INPUT);
+
+        vm.chainId(SRC_CHAIN);
+        vm.startPrank(user);
+        usdc.approve(address(srcCctp), INPUT);
+        vm.expectRevert(abi.encodeWithSelector(FastFillBase.InvalidCallbackGasLimit.selector, tooHigh, maxGas));
+        srcCctp.initiateCCTP(
+            DST_CHAIN, _b32(recipient), INPUT, MAX_FEE, 1000, WINDOW, RATE, 0, Execution(tooHigh, HOOK)
+        );
+        vm.stopPrank();
+
+        assertEq(tokenMessenger.burnCount(), 0, "no CCTP burn");
+        assertEq(usdc.balanceOf(user), INPUT, "funds not pulled");
+    }
+
+    function test_initiate_maxCallbackGasLimitAccepted() public {
+        uint64 maxGas = srcCctp.MAX_CALLBACK_GAS_LIMIT();
+        uint64 start = uint64(block.timestamp);
+        usdc.mint(user, INPUT);
+
+        vm.chainId(SRC_CHAIN);
+        vm.startPrank(user);
+        usdc.approve(address(srcCctp), INPUT);
+        (bytes32 orderId, uint64 nonce) = srcCctp.initiateCCTP(
+            DST_CHAIN, _b32(recipient), INPUT, MAX_FEE, 1000, WINDOW, RATE, 0, Execution(maxGas, HOOK)
+        );
+        vm.stopPrank();
+
+        Order memory order = _cctpOrder(INPUT, MAX_FEE, start, start + WINDOW, RATE, 0, nonce);
+        order.callbackGasLimit = maxGas;
+        order.hookData = HOOK;
+        assertEq(orderId, OrderLib.hash(order));
+        assertEq(keccak256(tokenMessenger.lastHookData()), keccak256(OrderLib.encode(order)), "hookData");
+        assertEq(tokenMessenger.burnCount(), 1, "CCTP burn dispatched");
     }
 
     // ---------------------------------------------------------------------------------------------

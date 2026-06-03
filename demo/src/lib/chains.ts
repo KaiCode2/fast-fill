@@ -16,9 +16,9 @@ export type SupportedChainId = (typeof SUPPORTED_CHAIN_IDS)[number];
 // Deployed fast-fill contracts (mainnet). CREATE2-deterministic → same address on every chain.
 // Env (NEXT_PUBLIC_*) overrides these if set. Source: repo DEPLOYMENTS.md.
 export const DEPLOYED = {
-  fastFillConfig: "0xE66dF457F18B4a8a30a251750BFfA21D843c749D",
-  cctpAdapter: "0xDde8F1F1f68fefc016Deb99B01A31AD474f1f626",
-  oftAdapter: "0x7E9F7540218E4F4e8F58D57ca54E54438bC39cBC",
+  fastFillConfig: "0xaec766479DB174110958Bc45D141A2C5eF693DF5",
+  cctpAdapter: "0xcceeB77d7E4FD660fFd8E501a29A58ec6133cF0E",
+  oftAdapter: "0x45165aD55c5FADa4AEeD968469dB6e8e85b943Bf",
 } as const;
 
 // Same address on every chain (CREATE2 / canonical).

@@ -1,80 +1,122 @@
 # Deployments
 
-Mainnet deployment of the fast-fill contracts — the current version with **base-fee pricing**,
-**on-chain timing**, **user-signed bridge mode**, and **destination executions**. Deployed to
-**Base, Optimism, and Arbitrum**. Ethereum L1 is intentionally not deployed (it has no funded
-deployer and is not part of the current demo set).
+Mainnet deployment of the current fast-fill contracts with canonical-recipient validation,
+`callbackGasLimit` capped at 5,000,000, transient reentrancy guards, bounded hook returndata copying,
+and deterministic per-OFT adapter isolation.
 
-> ⚠️ Prototype, **unaudited**. Deployed for demonstration only.
+Deployed to **Base, Optimism, and Arbitrum**. Ethereum L1 is supported by the registry constants but
+is intentionally not part of this deployment set.
+
+> Prototype. Deployed for demonstration and testing.
 
 ## Addresses
 
-All three contracts are **CREATE2-deterministic** — deployed via the canonical deterministic factory
-(`0x4e59b44847b379578588920cA78FbF26c0B4956C`) with a fixed salt, so each has the **same address on
-every chain**. The adapters take the `FastFillConfig` address as their only chain-specific argument;
-because the config address is identical everywhere, the adapters are deterministic too, and the
-counterpart on every chain is simply `address(this)`. There is no per-chain wiring.
+All contracts below are CREATE2-deterministic from deployer/owner
+`0xA06Bf163BC51A457D99C6283e78897727c4fDdF2` with `maxFeeRate = 5e15` (0.5%, WAD).
 
 | Contract | Address | Chains |
-|---|---|---|
-| `FastFillConfig` | [`0xE66dF457F18B4a8a30a251750BFfA21D843c749D`](#fastfillconfig) | Base · Optimism · Arbitrum |
-| `CctpAdapter` (USDC) | [`0xDde8F1F1f68fefc016Deb99B01A31AD474f1f626`](#cctpadapter) | Base · Optimism · Arbitrum |
-| `OftAdapter` (USD₮0) | [`0x7E9F7540218E4F4e8F58D57ca54E54438bC39cBC`](#oftadapter) | Optimism · Arbitrum |
+|---|---:|---|
+| `FastFillConfig` | `0xaec766479DB174110958Bc45D141A2C5eF693DF5` | Base · Optimism · Arbitrum |
+| `CctpAdapter` (USDC) | `0xcceeB77d7E4FD660fFd8E501a29A58ec6133cF0E` | Base · Optimism · Arbitrum |
+| `OftAdapterFactory` | `0x84Bb5d3142024da8d61CBEE0A4c722a1650fbFcb` | Base · Optimism · Arbitrum |
+| `OftAdapter` (USDt0, `oftId = 0`) | `0x45165aD55c5FADa4AEeD968469dB6e8e85b943Bf` | Base · Optimism · Arbitrum |
+| `OftAdapter` (USDe, `oftId = 1`) | `0x27989367741A6662daeFd5CabeC4f40323461778` | Base · Optimism · Arbitrum |
+| `OftAdapter` (sUSDe, `oftId = 2`) | `0x58E5315Ab8B975737d2655e838De12a2c48b497D` | Base · Optimism · Arbitrum |
+| `OftAdapter` (ENA, `oftId = 3`) | `0x3291098E6F0e7C206DfB64c54E6D4927e42262b8` | Base · Optimism · Arbitrum |
 
-- **CctpAdapter** is deployed on all three chains (USDC is everywhere).
-- **OftAdapter** is deployed only on **Optimism + Arbitrum** — USD₮0 has no deployment on Base, so the
-  OFT path there would be inert.
-- **Owner:** `0xA06Bf163BC51A457D99C6283e78897727c4fDdF2` (also the deployer).
-- **Adapter constructor args:** `config = 0xE66dF457F18B4a8a30a251750BFfA21D843c749D`,
-  `owner = 0xA06Bf163BC51A457D99C6283e78897727c4fDdF2`, `maxFeeRate = 5e15` (0.5% cap, WAD).
-- **CREATE2 salts:** `keccak256("fast-fill.config.v1")`, `…cctp.v1`, `…oft.v1`.
+Notes:
+
+- USDt0 is not configured on Base in `FastFillConfig`; the USDt0 adapter address is deployed there
+  for cross-chain determinism but USDt0 operations on Base revert as unsupported.
+- A deployed OFT adapter means the token has an adapter address, not that every chain pair is
+  peer-enabled by the token issuer's live OFT. A USDe Arbitrum -> Base smoke was simulated and the
+  live USDe OFT reverted with `NoPeer(30184)`; Arbitrum/Base USDe peers are currently zero.
+- USDtb (`oftId = 4`) is present in the registry but was not deployed by the current factory script.
+- The counterpart adapter for each bridge/token is the same address on every deployed chain.
+
+## Deploy Transactions
 
 ### FastFillConfig
-`0xE66dF457F18B4a8a30a251750BFfA21D843c749D`
 
-| Chain | Explorer | Deploy tx |
-|---|---|---|
-| Base | [address](https://basescan.org/address/0xE66dF457F18B4a8a30a251750BFfA21D843c749D) | [`0x460879…d18bbe`](https://basescan.org/tx/0x460879d1b7522a89c142fc4e8822343265c236bd41bead061bf62e1b06d18bbe) |
-| Optimism | [address](https://optimistic.etherscan.io/address/0xE66dF457F18B4a8a30a251750BFfA21D843c749D) | [`0x6fd57a…f05808`](https://optimistic.etherscan.io/tx/0x6fd57a32244c501f6ee697a1954588a5a4d37a49f873cedd62e39683c3f05808) |
-| Arbitrum | [address](https://arbiscan.io/address/0xE66dF457F18B4a8a30a251750BFfA21D843c749D) | [`0x819e6e…ad8b24`](https://arbiscan.io/tx/0x819e6e2d936fd841611a2b695bdd332688edddc453328fe0c0c754f20cad8b24) |
+| Chain | Tx |
+|---|---|
+| Base | `0x9edfe2845739f8d92a6017879403e51955f99343df1e4d80a22602ecb1064e91` |
+| Optimism | `0xb6c0005ce3d655c0e5b4adf6422029a4c0a7f9a1325179aca9011a0411c0c5c8` |
+| Arbitrum | `0xc20b96945fc3a9fb8d56305fe7734469f0385eda492bba1e98ee58443136b0f0` |
 
 ### CctpAdapter
-`0xDde8F1F1f68fefc016Deb99B01A31AD474f1f626`
 
-| Chain | Explorer | Deploy tx |
+| Chain | Tx |
+|---|---|
+| Base | `0x88dfcee68f406728c82a74ebd9e5f63778c4abece1e1858bfad457b883eb2cbc` |
+| Optimism | `0x7cc43793a6c827efdd24c4d35ddcee4c6d39a94295d160a2379b52e557a7ea41` |
+| Arbitrum | `0xca380656c57a5bd092dc62788cc9b1ea1303a63bd8e2b2634bedfee94357385f` |
+
+### OftAdapterFactory
+
+| Chain | Tx |
+|---|---|
+| Base | `0x6a9657abb1042980c048594b3ef4529483df82e642d0bb5aae9fc79b1d15349f` |
+| Optimism | `0xe36185c0c4b51a5b5f95132f3babbf1467027ed61cffb529edcb2eef5a1f1046` |
+| Arbitrum | `0x74385782b0624567c7beb461d5add0dd03cc0bc70db7bf5947977d1a625d22db` |
+
+### OFT Adapters
+
+| Token | Chain | Tx |
 |---|---|---|
-| Base | [address](https://basescan.org/address/0xDde8F1F1f68fefc016Deb99B01A31AD474f1f626) | [`0x7afe53…f4437e`](https://basescan.org/tx/0x7afe5342dedd899d0abffa8c550305cdc076ae0c54f8b9d2f083afae55f4437e) |
-| Optimism | [address](https://optimistic.etherscan.io/address/0xDde8F1F1f68fefc016Deb99B01A31AD474f1f626) | [`0xcf33d8…29af65e`](https://optimistic.etherscan.io/tx/0xcf33d85125351ec163e6e26ee292e37967b59e7770656e407cea162de29af65e) |
-| Arbitrum | [address](https://arbiscan.io/address/0xDde8F1F1f68fefc016Deb99B01A31AD474f1f626) | [`0x1fa9a0…0c4100`](https://arbiscan.io/tx/0x1fa9a0551ecf795e142082abbd3e156d50bd433178fe4a5d70ec731a270c4100) |
+| USDt0 | Base | `0x5f6cce8a93f14a9120982714991531b59829e774e69f23c59f62a4f3e769de4e` |
+| sUSDe | Base | `0x14fb6b02e84976e4d38ad3c9b7b5b6821797ef8d330c777158904d88dc8a8f00` |
+| USDe | Base | `0xeafd8dd4eb9c777339b4adf95fdb747d7af423a88e3bca75a57a21f18b1e3023` |
+| ENA | Base | `0x80fb9179b5f9b71a14e6a0d62cb1a3b259ac783c141c00e719665dcc9ba2d159` |
+| USDt0 | Optimism | `0x8e9abf9e5240565cecc864862c36ee6849228fb1bd8689c0aacc569fed185ba7` |
+| sUSDe | Optimism | `0x15d85fea9ec294bd3bc367c443df00198a6563bf88eebead35640b55f3e08f82` |
+| USDe | Optimism | `0x3c3330d1076d203189c9395c6467624ce9d9bf2f8f539b406ef775033a7be446` |
+| ENA | Optimism | `0xc18b962ac7785c8cb8c5092c21f49e35458a2bf6d48e701f1d977c04c3439e80` |
+| USDt0 | Arbitrum | `0x11d5e522d9a81c50bb63e40dad166f8fc00d48f1904469a0138cd40f2e849bdb` |
+| sUSDe | Arbitrum | `0xdc64ae20a3620c1f72e27905389d1a34da0a22f48df4ed504638354ee85b29b4` |
+| USDe | Arbitrum | `0x5931d02052cbc8c9a54596bb0759da065c8db24347d62782034f7d84b91cecb7` |
+| ENA | Arbitrum | `0x2646d23ed79661d894ccb0a2de122ca03f72443a09191e15e8ae488bdf7f7f26` |
 
-### OftAdapter
-`0x7E9F7540218E4F4e8F58D57ca54E54438bC39cBC`
+## Post-Deploy Checks
 
-| Chain | Explorer | Deploy tx |
-|---|---|---|
-| Optimism | [address](https://optimistic.etherscan.io/address/0x7E9F7540218E4F4e8F58D57ca54E54438bC39cBC) | [`0xc922ed…ad06ba`](https://optimistic.etherscan.io/tx/0xc922ed330f1520f6450388193ff75388bdc19e6cadd99e29e94d129a5bad06ba) |
-| Arbitrum | [address](https://arbiscan.io/address/0x7E9F7540218E4F4e8F58D57ca54E54438bC39cBC) | [`0xd50d04…a352cdf`](https://arbiscan.io/tx/0xd50d048dcd5fa428d745fc5cd09fa2c484511b99446a4ba674a39aa91a352cdf) |
+Confirmed on Base, Optimism, and Arbitrum:
 
-## Post-deploy verification (on-chain)
+- `CctpAdapter.config() == 0xaec766479DB174110958Bc45D141A2C5eF693DF5`
+- `CctpAdapter.owner() == 0xA06Bf163BC51A457D99C6283e78897727c4fDdF2`
+- `CctpAdapter.maxFeeRate() == 5e15`
+- `OftAdapterFactory.config() == 0xaec766479DB174110958Bc45D141A2C5eF693DF5`
+- `OftAdapterFactory.adapterOwner() == 0xA06Bf163BC51A457D99C6283e78897727c4fDdF2`
+- `OftAdapterFactory.maxFeeRate() == 5e15`
+- Each deployed OFT adapter reports the expected `oftId`, config, and owner.
 
-Confirmed after deployment:
+## Smoke Tests
 
-- `CctpAdapter.config() == 0xE66dF457F18B4a8a30a251750BFfA21D843c749D`, `owner() ==
-  0xA06Bf163BC51A457D99C6283e78897727c4fDdF2`, `maxFeeRate() == 5e15` on each chain; both adapters
-  resolve the same config on Base/OP/ARB.
-- `FastFillConfig.chainConfig(8453)` returns Base USDC `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`,
-  CCTP domain `6`, LZ eid `30184`, TokenMessenger `0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d`.
-- Deployed runtime sizes match the compiled bytecode (CctpAdapter 17,245 B; OftAdapter 17,397 B).
+- USDC CCTP Base -> Arbitrum:
+  - Source tx: `0x4267e424c580a7aa197eb428b5c8f9c7978fb532ccb09d73e0679150ac06943a`
+  - Settle tx: `0xb1950a92b326325fc999b2b598aa256491680b30042cef07aa61981bc844518a`
+  - Result: 1.000000 USDC burned on Base; 0.999870 USDC delivered on Arbitrum; destination adapter balance returned to zero.
+- USDt0 OFT Optimism -> Arbitrum:
+  - Source tx: `0xa7f16e39adba31f3f90878d8dafbd39cbee689029d0f9e4cc0cb6c0ffe5582a2`
+  - LayerZero GUID: `0x1045d986d707c16043e3201192531e5fe388a872c989e211ab5edeb8dba7c4b4`
+  - Status at submission time: in flight, waiting for the USDT0 pathway's 1000 source confirmations.
+- USDe OFT Arbitrum -> Base:
+  - Not broadcast. Simulation reverted during `quoteSend` with `NoPeer(30184)`.
+  - Live USDe OFT checks: Arbitrum `peers(30184) == 0`, Base `peers(30110) == 0`.
 
 ## Reproduce
 
 ```bash
-# 1. Config (same address on every chain)
+# 1. Config on each target chain.
 forge script script/DeployFastFillConfig.s.sol --rpc-url $RPC --broadcast --private-key $KEY
 
-# 2. Adapters against it (CONFIG identical on every chain ⇒ adapters deterministic)
-CONFIG=0xE66dF457F18B4a8a30a251750BFfA21D843c749D OWNER=0xA06Bf163BC51A457D99C6283e78897727c4fDdF2 \
+# 2. CCTP adapter and OFT factory against the deterministic config.
+CONFIG=0xaec766479DB174110958Bc45D141A2C5eF693DF5 OWNER=0xA06Bf163BC51A457D99C6283e78897727c4fDdF2 \
   forge script script/DeployCctpAdapter.s.sol --rpc-url $RPC --broadcast --private-key $KEY
-CONFIG=0xE66dF457F18B4a8a30a251750BFfA21D843c749D OWNER=0xA06Bf163BC51A457D99C6283e78897727c4fDdF2 \
-  forge script script/DeployOftAdapter.s.sol  --rpc-url $RPC --broadcast --private-key $KEY   # OP/ARB only
+
+CONFIG=0xaec766479DB174110958Bc45D141A2C5eF693DF5 OWNER=0xA06Bf163BC51A457D99C6283e78897727c4fDdF2 \
+  forge script script/DeployOftAdapterFactory.s.sol --rpc-url $RPC --broadcast --private-key $KEY
+
+# 3. OFT adapters via the factory.
+FACTORY=0x84Bb5d3142024da8d61CBEE0A4c722a1650fbFcb \
+  forge script script/DeployOftAdapter.s.sol:DeployOftAdapters --rpc-url $RPC --broadcast --private-key $KEY
 ```

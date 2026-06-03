@@ -72,14 +72,15 @@ contract CctpAdapter is FastFillBase {
     /// @notice Burn USDC on this chain and create an optimistically-fillable order on `dstChainId`.
     ///         `msg.sender` is the user and the payer (approve this adapter, or batch a `selfPermit`
     ///         via `multicall` for a single transaction).
+    /// @param recipient Destination EVM address encoded as bytes32 (upper 12 bytes zero).
     /// @param maxFee The max fast-transfer fee. `outputAmount = inputAmount - maxFee` is the
     ///               deterministic worst-case amount the filler is owed (feeExecuted <= maxFee).
     /// @param minFinalityThreshold The bridging speed the user opts into (FINALITY_FAST / FINALITY_FINALIZED).
     /// @param deliveryWindow Seconds until the time premium decays to 0; `expectedDeliveryTime` is
     ///                       derived on-chain as `block.timestamp + deliveryWindow`.
     /// @param discountRate Time-premium accrual per second (WAD); `baseFee` is a flat fee on any fill.
-    /// @param exec Optional destination execution: `gasLimit` forwarded to the recipient's `onFastFill`
-    ///             hook + the `data` payload. Empty `data` = deliver funds only, no callback.
+    /// @param exec Optional destination execution: `gasLimit` (max 5,000,000) forwarded to the
+    ///             recipient's `onFastFill` hook + the `data` payload. Empty `data` = deliver funds only, no callback.
     function initiateCCTP(
         uint32 dstChainId,
         bytes32 recipient,
@@ -92,7 +93,6 @@ contract CctpAdapter is FastFillBase {
         Execution calldata exec
     ) external whenNotPaused returns (bytes32 orderId, uint64 nonce) {
         if (maxFee >= inputAmount) revert MaxFeeTooHigh(maxFee, inputAmount);
-        SafeTransferLib.safeTransferFrom(config.chainConfig(block.chainid).usdc, msg.sender, address(this), inputAmount);
         nonce = _nextNonce();
         Order memory order = _buildOrder(
             msg.sender, dstChainId, recipient, inputAmount, maxFee, deliveryWindow, discountRate, baseFee, nonce
@@ -100,6 +100,7 @@ contract CctpAdapter is FastFillBase {
         order.callbackGasLimit = exec.gasLimit;
         order.hookData = exec.data;
         _assertCreatable(order);
+        SafeTransferLib.safeTransferFrom(config.chainConfig(block.chainid).usdc, msg.sender, address(this), inputAmount);
         orderId = _finishInitiate(order, maxFee, minFinalityThreshold);
     }
 
