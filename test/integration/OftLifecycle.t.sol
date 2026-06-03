@@ -2,7 +2,7 @@
 pragma solidity ^0.8.26;
 
 import {Fixtures} from "../utils/Fixtures.sol";
-import {Order, OrderLib} from "../../src/libraries/OrderLib.sol";
+import {Order, OrderLib, Execution} from "../../src/libraries/OrderLib.sol";
 import {PricingLib} from "../../src/libraries/PricingLib.sol";
 import {FastFillBase} from "../../src/FastFillBase.sol";
 import {OftAdapter} from "../../src/adapters/OftAdapter.sol";
@@ -36,7 +36,8 @@ contract OftLifecycleTest is Fixtures {
         vm.startPrank(user);
         oftToken.approve(address(srcOft), INPUT);
         uint64 nonce;
-        (orderId, nonce) = srcOft.initiateOFT(DST_CHAIN, _b32(recipient), INPUT, MIN_OUT, "", WINDOW, RATE, baseFee);
+        (orderId, nonce) =
+            srcOft.initiateOFT(DST_CHAIN, _b32(recipient), INPUT, MIN_OUT, "", WINDOW, RATE, baseFee, Execution(0, ""));
         vm.stopPrank();
         order = _oftOrder(INPUT, MIN_OUT, start, start + WINDOW, RATE, baseFee, nonce);
     }

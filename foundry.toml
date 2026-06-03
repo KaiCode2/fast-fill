@@ -14,7 +14,9 @@ solc = "0.8.26"
 evm_version = "cancun"
 optimizer = true
 optimizer_runs = 1_000_000
-via_ir = false
+# IR pipeline: required for the parameter-heavy sponsored entrypoints (initiate*For carry the order
+# terms + destination execution + Permit2 auth) and yields better-optimized runtime bytecode.
+via_ir = true
 bytecode_hash = "none"
 remappings = [
     "forge-std/=lib/forge-std/src/",

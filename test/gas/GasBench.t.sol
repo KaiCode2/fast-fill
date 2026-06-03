@@ -3,7 +3,7 @@ pragma solidity ^0.8.26;
 
 import {console2} from "forge-std/console2.sol";
 import {Fixtures} from "../utils/Fixtures.sol";
-import {Order, OrderLib} from "../../src/libraries/OrderLib.sol";
+import {Order, OrderLib, Execution} from "../../src/libraries/OrderLib.sol";
 import {CctpMessageBuilder} from "../utils/CctpMessageBuilder.sol";
 import {SendParam, MessagingFee} from "../../src/interfaces/layerzero/IOFT.sol";
 
@@ -52,7 +52,7 @@ contract GasBenchTest is Fixtures {
         usdc.approve(address(srcCctp), INPUT);
         vm.prank(user);
         uint256 g0 = gasleft();
-        srcCctp.initiateCCTP(DST_CHAIN, _b32(recipient), INPUT, MAX_FEE, 1000, WINDOW, RATE, 0);
+        srcCctp.initiateCCTP(DST_CHAIN, _b32(recipient), INPUT, MAX_FEE, 1000, WINDOW, RATE, 0, Execution(0, ""));
         used = g0 - gasleft();
     }
 
@@ -130,7 +130,7 @@ contract GasBenchTest is Fixtures {
         oftToken.approve(address(srcOft), OFT_INPUT);
         vm.prank(user);
         uint256 g0 = gasleft();
-        srcOft.initiateOFT(DST_CHAIN, _b32(recipient), OFT_INPUT, OFT_MIN, "", WINDOW, RATE, 0);
+        srcOft.initiateOFT(DST_CHAIN, _b32(recipient), OFT_INPUT, OFT_MIN, "", WINDOW, RATE, 0, Execution(0, ""));
         used = g0 - gasleft();
     }
 

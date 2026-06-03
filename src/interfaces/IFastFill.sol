@@ -10,6 +10,13 @@ enum FillStatus {
     Settled // the bridge message arrived and funds were disbursed (terminal)
 }
 
+/// @notice Outcome of a destination-execution callback (see IFastFillReceiver).
+enum CallbackResult {
+    Executed, // onFastFill succeeded; funds delivered to the recipient and the hook ran
+    Redirected, // onFastFill reverted with RedirectFunds(dest); funds delivered to dest instead
+    Claimable // onFastFill reverted otherwise; funds credited to the recipient's claim ledger
+}
+
 /// @notice Destination-chain record for an order. Packs into a single storage slot.
 struct OrderRecord {
     address filler; // 20 bytes — relayer that filled (0 if unfilled)
@@ -45,6 +52,10 @@ interface IFastFill {
 
     /// @notice A previously-deferred payout was claimed.
     event Claimed(address indexed account, address indexed token, uint256 amount);
+
+    /// @notice A destination-execution hook ran for a delivered order; `result` records the outcome
+    ///         and `fundsTo` the address that ultimately received the funds.
+    event DestinationCallback(bytes32 indexed orderId, address indexed fundsTo, CallbackResult result);
 
     /// @notice Optimistically fill an in-flight order; pays the recipient now, records the filler.
     function fill(Order calldata order) external returns (bytes32 orderId);

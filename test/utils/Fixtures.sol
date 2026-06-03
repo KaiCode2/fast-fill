@@ -140,7 +140,9 @@ abstract contract Fixtures is Test {
             startTime: startTime,
             expectedDeliveryTime: expectedDeliveryTime,
             discountRate: discountRate,
-            baseFee: baseFee
+            baseFee: baseFee,
+            callbackGasLimit: 0,
+            hookData: ""
         });
     }
 
@@ -167,7 +169,9 @@ abstract contract Fixtures is Test {
             startTime: startTime,
             expectedDeliveryTime: expectedDeliveryTime,
             discountRate: discountRate,
-            baseFee: baseFee
+            baseFee: baseFee,
+            callbackGasLimit: 0,
+            hookData: ""
         });
     }
 

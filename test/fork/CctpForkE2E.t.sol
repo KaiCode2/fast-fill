@@ -6,7 +6,7 @@ import {console2} from "forge-std/console2.sol";
 import {ForkBase} from "./ForkBase.sol";
 import {CctpAdapter} from "../../src/adapters/CctpAdapter.sol";
 import {FastFillConfig} from "../../src/config/FastFillConfig.sol";
-import {Order, OrderLib} from "../../src/libraries/OrderLib.sol";
+import {Order, OrderLib, Execution} from "../../src/libraries/OrderLib.sol";
 import {AddressCast} from "../../src/libraries/AddressCast.sol";
 import {Addresses} from "../../script/config/Addresses.sol";
 import {ParseHarness} from "../utils/ParseHarness.sol";
@@ -61,7 +61,7 @@ contract CctpForkE2ETest is ForkBase {
         // deliveryWindow is relative; expectedDeliveryTime is derived on-chain as start + WINDOW.
         uint256 g0 = gasleft();
         (_orderIdFromInit, nonce) =
-            adapter.initiateCCTP(BASE_CHAIN, recipient.toBytes32(), AMOUNT, 0, 2000, WINDOW, RATE, 0);
+            adapter.initiateCCTP(BASE_CHAIN, recipient.toBytes32(), AMOUNT, 0, 2000, WINDOW, RATE, 0, Execution(0, ""));
         // Real end-to-end source gas through fast-fill (vs the mock numbers in test/gas/GasBench).
         console2.log("FORK real initiateCCTP gas (incl. real CCTP burn):", g0 - gasleft());
         vm.stopPrank();
@@ -90,7 +90,9 @@ contract CctpForkE2ETest is ForkBase {
             startTime: start,
             expectedDeliveryTime: start + WINDOW,
             discountRate: RATE,
-            baseFee: 0
+            baseFee: 0,
+            callbackGasLimit: 0,
+            hookData: ""
         });
     }
 
