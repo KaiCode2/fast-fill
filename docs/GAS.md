@@ -7,16 +7,17 @@ How much gas the fast-fill adapters consume, and — the question that matters f
 
 | Operation | fast-fill adds (overhead) | Notes |
 |---|---:|---|
-| **CCTP initiate** (`initiateCCTP`) vs direct `depositForBurnWithHook` | **≈ 91k gas** | pull funds into the adapter, build + hash the order, assign the nonce, live domain cross-check, `OrderCreated` |
-| **CCTP settle** (`settle`) vs direct `receiveMessage` | **≈ 65k gas** | re-parse the authenticated message, 3 auth checks, write the order record, disburse to filler/recipient |
-| **OFT initiate** (`initiateOFT`) vs direct `oft.send` | **≈ 72k gas** | same shape as CCTP initiate (token + eid cross-check instead of domain) |
-| **CCTP `fill`** | **≈ 62k gas (absolute)** | a fast-fill primitive — no bridge equivalent |
+| **CCTP initiate** (`initiateCCTP`) vs direct `depositForBurnWithHook` | **≈ 92k gas** | pull funds into the adapter, build + hash the order, assign the nonce, live domain cross-check, `OrderCreated` |
+| **CCTP settle** (`settle`) vs direct `receiveMessage` | **≈ 64k gas** | re-parse the authenticated message, 3 auth checks, write the order record, disburse to filler/recipient |
+| **OFT initiate** (`initiateOFT`) vs direct `oft.send` | **≈ 74k gas** | same shape as CCTP initiate (token + eid cross-check instead of domain) |
+| **CCTP `fill`** | **≈ 63k gas (absolute)** | a fast-fill primitive — no bridge equivalent |
 | **OFT settle** (`lzCompose`) | **≈ 47k gas (absolute)** | the compose callback *is* the settle on OFT; no bridge equivalent |
 
 The overhead is small relative to a cross-chain transfer: a real CCTP burn through the adapter costs
-**212,517 gas end-to-end** on an Ethereum mainnet fork (measured below), of which the bridge itself is
+**217,216 gas end-to-end** on an Ethereum mainnet fork (measured below), of which the bridge itself is
 the large majority. fast-fill never adds a second message or escrow — it rides the bridge's own
-authenticated channel.
+authenticated channel. (Numbers are with the IR pipeline, `via_ir = true`; a destination-execution hook
+is opt-in and adds nothing when `hookData` is empty.)
 
 ## Methodology
 
@@ -49,18 +50,18 @@ off `--gas-report`, whose call tracing inflates every number):
 
 ```
 --- CCTP ---
-initiateCCTP (fast-fill)        : 108,503
-depositForBurnWithHook (direct) :  17,558
-  => initiate OVERHEAD          :  90,945
-fill (fast-fill only)           :  61,610
-settle unfilled (fast-fill)     :  95,211
-receiveMessage (direct)         :  30,660
-  => settle OVERHEAD            :  64,551
+initiateCCTP (fast-fill)        : 110,870
+depositForBurnWithHook (direct) :  18,712
+  => initiate OVERHEAD          :  92,158
+fill (fast-fill only)           :  63,274
+settle unfilled (fast-fill)     :  91,772
+receiveMessage (direct)         :  27,691
+  => settle OVERHEAD            :  64,081
 --- OFT ---
-initiateOFT (fast-fill)         :  89,305
-oft.send (direct)               :  17,132
-  => initiate OVERHEAD          :  72,173
-lzCompose settle (fast-fill)    :  46,575
+initiateOFT (fast-fill)         :  92,774
+oft.send (direct)               :  18,616
+  => initiate OVERHEAD          :  74,158
+lzCompose settle (fast-fill)    :  47,089
 ```
 
 > The absolute mock numbers are **illustrative only** — the real CCTP/LayerZero contracts cost far
@@ -71,7 +72,7 @@ lzCompose settle (fast-fill)    :  46,575
 From `FOUNDRY_PROFILE=fork forge test --match-path test/fork/CctpForkE2E.t.sol -vv` (requires an RPC):
 
 ```
-FORK real initiateCCTP gas (incl. real CCTP burn): 212,517
+FORK real initiateCCTP gas (incl. real CCTP burn): 217,216
 ```
 
 This is the full source-side cost a user pays to start a transfer through fast-fill, real CCTP burn
@@ -83,9 +84,9 @@ Both adapters are well under the 24,576-byte EIP-170 limit (`forge build --sizes
 
 | Contract | Runtime size | Margin |
 |---|---:|---:|
-| `CctpAdapter` | 16,022 B | 8,554 B |
-| `OftAdapter` | ~16,908 B | ~7,668 B |
-| `FastFillConfig` | 988 B | 23,588 B |
+| `CctpAdapter` | 17,245 B | 7,331 B |
+| `OftAdapter` | 17,397 B | 7,179 B |
+| `FastFillConfig` | 930 B | 23,646 B |
 
 ## Reproduce
 

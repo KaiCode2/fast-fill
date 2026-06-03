@@ -4,7 +4,7 @@ pragma solidity ^0.8.26;
 import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 
 import {FastFillBase} from "../FastFillBase.sol";
-import {Order, OrderLib} from "../libraries/OrderLib.sol";
+import {Order, OrderLib, Execution} from "../libraries/OrderLib.sol";
 import {AddressCast} from "../libraries/AddressCast.sol";
 import {OFTComposeMsgCodec} from "../libraries/OFTComposeMsgCodec.sol";
 import {PermitLib} from "../libraries/PermitLib.sol";
@@ -72,6 +72,8 @@ contract OftAdapter is FastFillBase, ILayerZeroComposer {
     /// @param deliveryWindow Seconds until the time premium decays to 0; `expectedDeliveryTime` is
     ///                       derived on-chain as `block.timestamp + deliveryWindow`.
     /// @param discountRate Time-premium accrual per second (WAD); `baseFee` is a flat fee on any fill.
+    /// @param exec Optional destination execution: `gasLimit` forwarded to the recipient's `onFastFill`
+    ///             hook + the `data` payload. Empty `data` = deliver funds only, no callback.
     function initiateOFT(
         uint32 dstChainId,
         bytes32 recipient,
@@ -80,7 +82,8 @@ contract OftAdapter is FastFillBase, ILayerZeroComposer {
         bytes calldata extraOptions,
         uint64 deliveryWindow,
         uint256 discountRate,
-        uint256 baseFee
+        uint256 baseFee,
+        Execution calldata exec
     ) external payable whenNotPaused returns (bytes32 orderId, uint64 nonce) {
         SafeTransferLib.safeTransferFrom(
             config.chainConfig(block.chainid).usdt0Token, msg.sender, address(this), inputAmount
@@ -89,6 +92,8 @@ contract OftAdapter is FastFillBase, ILayerZeroComposer {
         Order memory order = _buildOrder(
             msg.sender, dstChainId, recipient, inputAmount, minAmountLD, deliveryWindow, discountRate, baseFee, nonce
         );
+        order.callbackGasLimit = exec.gasLimit;
+        order.hookData = exec.data;
         _assertCreatable(order);
         orderId = _finishInitiate(order, extraOptions);
     }
@@ -108,6 +113,7 @@ contract OftAdapter is FastFillBase, ILayerZeroComposer {
         uint64 deliveryWindow,
         uint256 discountRate,
         uint256 baseFee,
+        Execution calldata exec,
         address from,
         PermitLib.Permit2Data calldata permit
     ) external payable whenNotPaused returns (bytes32 orderId, uint64 nonce) {
@@ -115,8 +121,10 @@ contract OftAdapter is FastFillBase, ILayerZeroComposer {
         Order memory order = _buildOrder(
             from, dstChainId, recipient, inputAmount, minAmountLD, deliveryWindow, discountRate, baseFee, nonce
         );
+        order.callbackGasLimit = exec.gasLimit;
+        order.hookData = exec.data;
         _assertCreatable(order);
-        // Pull AFTER building so the witness binds the order; bind the opted-into executor config too.
+        // Pull AFTER building so the witness binds the order (incl. hookData + gas); bind the executor config too.
         _pullOrderViaPermit2(order, from, permit, keccak256(extraOptions));
         orderId = _finishInitiate(order, extraOptions);
     }
@@ -168,7 +176,9 @@ contract OftAdapter is FastFillBase, ILayerZeroComposer {
             startTime: uint64(block.timestamp),
             expectedDeliveryTime: uint64(block.timestamp) + deliveryWindow,
             discountRate: discountRate,
-            baseFee: baseFee
+            baseFee: baseFee,
+            callbackGasLimit: 0, // set by the entrypoint after build (keeps this frame's stack shallow)
+            hookData: ""
         });
     }
 

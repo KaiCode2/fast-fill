@@ -6,7 +6,8 @@ import {ReentrancyGuard} from "solady/utils/ReentrancyGuard.sol";
 import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 import {Multicallable} from "solady/utils/Multicallable.sol";
 
-import {IFastFill, FillStatus, OrderRecord} from "./interfaces/IFastFill.sol";
+import {IFastFill, FillStatus, OrderRecord, CallbackResult} from "./interfaces/IFastFill.sol";
+import {IFastFillReceiver} from "./interfaces/IFastFillReceiver.sol";
 import {IERC20Permit} from "./interfaces/IERC20Permit.sol";
 import {ISignatureTransfer} from "./interfaces/permit2/ISignatureTransfer.sol";
 import {Order, OrderLib} from "./libraries/OrderLib.sol";
@@ -51,6 +52,8 @@ abstract contract FastFillBase is IFastFill, Ownable, ReentrancyGuard, Multicall
     error UnsupportedChain(uint32 chainId);
     error NotSourceChain(uint32 srcChainId);
     error ZeroRecipient();
+    error InsufficientCallbackGas(uint256 available, uint256 callbackGasLimit);
+    error OnlySelf();
 
     // ---------------------------------------------------------------------------------------------
     // Storage
@@ -115,7 +118,7 @@ abstract contract FastFillBase is IFastFill, Ownable, ReentrancyGuard, Multicall
         uint256 fee;
         (orderId, token, recipient, payout, fee) = _prepareFill(order, msg.sender);
         SafeTransferLib.safeTransferFrom(token, msg.sender, address(this), payout);
-        _payout(orderId, token, recipient, payout);
+        _deliverWithHook(orderId, token, recipient, payout, order.hookData, order.callbackGasLimit);
         emit OrderFilled(orderId, msg.sender, payout, fee, uint40(block.timestamp));
     }
 
@@ -139,7 +142,7 @@ abstract contract FastFillBase is IFastFill, Ownable, ReentrancyGuard, Multicall
         // The filler signed `permitted.amount == order.outputAmount` (worst-case) for this orderId;
         // pull only the actual payout.
         _pullFillViaPermit2(orderId, token, filler, order.outputAmount, payout, permit);
-        _payout(orderId, token, recipient, payout);
+        _deliverWithHook(orderId, token, recipient, payout, order.hookData, order.callbackGasLimit);
         emit OrderFilled(orderId, filler, payout, fee, uint40(block.timestamp));
     }
 
@@ -197,11 +200,12 @@ abstract contract FastFillBase is IFastFill, Ownable, ReentrancyGuard, Multicall
 
         if (filler != address(0)) {
             // Order was optimistically filled: reimburse the filler exactly `owed`; surplus -> recipient.
+            // The recipient's hook (if any) already ran at fill time, so the dust surplus is a plain payout.
             _payout(orderId, token, filler, owed);
             if (surplus != 0) _payout(orderId, token, recipient, surplus);
         } else {
-            // Never filled: the recipient receives everything that arrived.
-            _payout(orderId, token, recipient, arrived);
+            // Never filled: the recipient receives everything that arrived, running any destination hook.
+            _deliverWithHook(orderId, token, recipient, arrived, order.hookData, order.callbackGasLimit);
         }
 
         emit OrderSettled(orderId, filler, arrived, surplus);
@@ -223,6 +227,99 @@ abstract contract FastFillBase is IFastFill, Ownable, ReentrancyGuard, Multicall
     function _tryTransfer(address token, address to, uint256 amount) private returns (bool) {
         (bool ok, bytes memory ret) = token.call(abi.encodeWithSelector(0xa9059cbb, to, amount)); // transfer(address,uint256)
         return ok && (ret.length == 0 || abi.decode(ret, (bool)));
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Destination execution (optional recipient callback on delivery)
+    // ---------------------------------------------------------------------------------------------
+
+    /// @dev Deliver `amount` of `token` to `recipient` and, if the order carries hookData and the
+    ///      recipient is a contract, run its `onFastFill` in the SAME atomic frame. A failed callback
+    ///      rolls the transfer back (the adapter keeps the funds) and routes them by the receiver's
+    ///      bounded revert data: `RedirectFunds(dest)` -> dest; anything else -> the claim ledger.
+    ///      Funds are never stuck. The whole base stays `nonReentrant`, so the receiver cannot
+    ///      re-enter fill/settle/claim, and the call is gas-capped + return-bomb-safe.
+    function _deliverWithHook(
+        bytes32 orderId,
+        address token,
+        address recipient,
+        uint256 amount,
+        bytes memory hookData,
+        uint64 gasLimit
+    ) internal {
+        if (amount == 0) return;
+        // No execution requested, or a codeless address (EOA / undeployed) that cannot run a hook:
+        // just deliver. A low-level call to a codeless address would otherwise "succeed" with no effect.
+        if (hookData.length == 0 || recipient.code.length == 0) {
+            _payout(orderId, token, recipient, amount);
+            return;
+        }
+        // Ensure the relayer forwards the user's signed gas budget (EIP-150 63/64 across the self-call
+        // and the hook call, plus the ERC20 transfer); otherwise force a retry instead of letting an
+        // under-funded call silently route to the claim ledger.
+        if (gasleft() < gasLimit + gasLimit / 32 + 50_000) revert InsufficientCallbackGas(gasleft(), gasLimit);
+
+        try this._executeDelivery(token, recipient, amount, orderId, hookData, gasLimit) {
+            emit DestinationCallback(orderId, recipient, CallbackResult.Executed);
+        } catch (bytes memory reason) {
+            address dest = _parseRedirect(reason);
+            if (dest != address(0) && dest != address(this)) {
+                _payout(orderId, token, dest, amount);
+                emit DestinationCallback(orderId, dest, CallbackResult.Redirected);
+            } else {
+                _claimable[recipient][token] += amount;
+                emit PayoutDeferred(orderId, recipient, token, amount);
+                emit DestinationCallback(orderId, recipient, CallbackResult.Claimable);
+            }
+        }
+    }
+
+    /// @dev Self-only delivery+callback frame. Transfers funds then calls `onFastFill` with a fixed
+    ///      gas budget, copying at most 36 bytes of returndata (return-bomb-safe). On callback failure
+    ///      it re-reverts with those bounded bytes so the caller's `try` rolls the transfer back and
+    ///      can parse a redirect. Not `nonReentrant`, so the self-call passes the caller's guard.
+    function _executeDelivery(
+        address token,
+        address recipient,
+        uint256 amount,
+        bytes32 orderId,
+        bytes calldata hookData,
+        uint256 gasLimit
+    ) external {
+        if (msg.sender != address(this)) revert OnlySelf();
+        SafeTransferLib.safeTransfer(token, recipient, amount);
+        bytes memory cd = abi.encodeCall(IFastFillReceiver.onFastFill, (orderId, token, amount, hookData));
+        bool ok;
+        bytes memory ret;
+        assembly {
+            ok := call(gasLimit, recipient, 0, add(cd, 0x20), mload(cd), 0x00, 0x00)
+            let size := returndatasize()
+            if gt(size, 0x24) { size := 0x24 } // cap at RedirectFunds(address): selector(4) + word(32)
+            ret := mload(0x40)
+            mstore(ret, size)
+            returndatacopy(add(ret, 0x20), 0x00, size)
+            mstore(0x40, add(ret, and(add(add(size, 0x20), 0x1f), not(0x1f))))
+        }
+        if (!ok) {
+            assembly {
+                revert(add(ret, 0x20), mload(ret))
+            }
+        }
+    }
+
+    /// @dev Decode a `RedirectFunds(address)` revert (selector + 32-byte address = 36 bytes); else 0.
+    function _parseRedirect(bytes memory reason) private pure returns (address dest) {
+        if (reason.length == 0x24) {
+            bytes32 selWord;
+            bytes32 addrWord;
+            assembly {
+                selWord := mload(add(reason, 0x20))
+                addrWord := mload(add(reason, 0x24))
+            }
+            if (bytes4(selWord) == IFastFillReceiver.RedirectFunds.selector) {
+                dest = address(uint160(uint256(addrWord)));
+            }
+        }
     }
 
     /// @inheritdoc IFastFill
@@ -267,7 +364,9 @@ abstract contract FastFillBase is IFastFill, Ownable, ReentrancyGuard, Multicall
             order.expectedDeliveryTime - order.startTime,
             order.discountRate,
             order.baseFee,
-            bridgeParams
+            bridgeParams,
+            keccak256(order.hookData),
+            order.callbackGasLimit
         );
         _pullViaPermit2(
             order.inputToken.toAddress(),

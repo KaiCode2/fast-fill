@@ -2,7 +2,7 @@
 pragma solidity ^0.8.26;
 
 import {Fixtures} from "../utils/Fixtures.sol";
-import {Order, OrderLib} from "../../src/libraries/OrderLib.sol";
+import {Order, OrderLib, Execution} from "../../src/libraries/OrderLib.sol";
 import {PermitLib} from "../../src/libraries/PermitLib.sol";
 import {FastFillBase} from "../../src/FastFillBase.sol";
 import {FillStatus} from "../../src/interfaces/IFastFill.sol";
@@ -52,7 +52,8 @@ contract PermitTest is Fixtures {
         bytes[] memory calls = new bytes[](2);
         calls[0] = abi.encodeCall(cctp.selfPermit, (address(usdc), INPUT, deadline, v, r, s));
         calls[1] = abi.encodeCall(
-            cctp.initiateCCTP, (DST_CHAIN, _b32(recipient), INPUT, MAX_FEE, 1000, WINDOW, RATE, uint256(0))
+            cctp.initiateCCTP,
+            (DST_CHAIN, _b32(recipient), INPUT, MAX_FEE, 1000, WINDOW, RATE, uint256(0), Execution(0, ""))
         );
 
         // No prior approve() — the permit inside the same tx authorizes the pull.
@@ -83,6 +84,7 @@ contract PermitTest is Fixtures {
             WINDOW,
             RATE,
             0,
+            Execution(0, ""),
             permitUser,
             PermitLib.Permit2Data({nonce: 0, deadline: block.timestamp + 1, signature: ""})
         );
@@ -103,7 +105,9 @@ contract PermitTest is Fixtures {
                 WINDOW,
                 RATE,
                 0,
-                keccak256(abi.encode(MAX_FEE, uint32(1000)))
+                keccak256(abi.encode(MAX_FEE, uint32(1000))),
+                keccak256(""),
+                uint64(0)
             ),
             "signature bound to the order intent + bridge mode"
         );
@@ -126,6 +130,7 @@ contract PermitTest is Fixtures {
             WINDOW,
             RATE,
             0,
+            Execution(0, ""),
             permitUser,
             PermitLib.Permit2Data({nonce: 0, deadline: block.timestamp + 1, signature: ""})
         );

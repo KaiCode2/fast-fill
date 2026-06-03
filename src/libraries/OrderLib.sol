@@ -26,6 +26,16 @@ struct Order {
     uint64 expectedDeliveryTime; // absolute timestamp — time premium decays to 0 at/after this point
     uint256 discountRate; // WAD per second — user-chosen time-premium accrual rate
     uint256 baseFee; // flat fee (output-token units) owed to the filler on any fill — additive, no decay
+    uint64 callbackGasLimit; // gas forwarded to the recipient's onFastFill hook (signed; priced into baseFee)
+    bytes hookData; // optional destination-execution payload; empty = deliver funds only, no callback
+}
+
+/// @notice A user-requested destination execution, passed to `initiate*`: the gas budget forwarded to
+///         the recipient's `onFastFill` hook plus the payload. Empty `data` = deliver funds, no callback.
+///         Bundled as one struct so the initiate entrypoints stay under the stack-depth limit.
+struct Execution {
+    uint64 gasLimit;
+    bytes data;
 }
 
 library OrderLib {

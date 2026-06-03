@@ -3,7 +3,7 @@ pragma solidity ^0.8.26;
 
 import {Fixtures} from "../utils/Fixtures.sol";
 import {CctpMessageBuilder} from "../utils/CctpMessageBuilder.sol";
-import {Order, OrderLib} from "../../src/libraries/OrderLib.sol";
+import {Order, OrderLib, Execution} from "../../src/libraries/OrderLib.sol";
 import {PricingLib} from "../../src/libraries/PricingLib.sol";
 import {FastFillBase} from "../../src/FastFillBase.sol";
 import {CctpAdapter} from "../../src/adapters/CctpAdapter.sol";
@@ -38,7 +38,9 @@ contract CctpLifecycleTest is Fixtures {
         vm.startPrank(user);
         usdc.approve(address(srcCctp), INPUT);
         uint64 nonce;
-        (orderId, nonce) = srcCctp.initiateCCTP(DST_CHAIN, _b32(recipient), INPUT, MAX_FEE, 1000, WINDOW, RATE, baseFee);
+        (orderId, nonce) = srcCctp.initiateCCTP(
+            DST_CHAIN, _b32(recipient), INPUT, MAX_FEE, 1000, WINDOW, RATE, baseFee, Execution(0, "")
+        );
         vm.stopPrank();
         order = _cctpOrder(INPUT, MAX_FEE, start, start + WINDOW, RATE, baseFee, nonce);
     }
@@ -156,7 +158,9 @@ contract CctpLifecycleTest is Fixtures {
         usdc.approve(address(srcCctp), INPUT);
         // baseFee >= outputAmount (INPUT - MAX_FEE) leaves the recipient nothing at fill -> rejected.
         vm.expectRevert(abi.encodeWithSelector(FastFillBase.InvalidBaseFee.selector, INPUT - MAX_FEE, INPUT - MAX_FEE));
-        srcCctp.initiateCCTP(DST_CHAIN, _b32(recipient), INPUT, MAX_FEE, 1000, WINDOW, RATE, INPUT - MAX_FEE);
+        srcCctp.initiateCCTP(
+            DST_CHAIN, _b32(recipient), INPUT, MAX_FEE, 1000, WINDOW, RATE, INPUT - MAX_FEE, Execution(0, "")
+        );
         vm.stopPrank();
     }
 

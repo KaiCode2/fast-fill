@@ -20,7 +20,9 @@ contract OrderLibTest is Test {
             startTime: 1_000_000,
             expectedDeliveryTime: 1_000_100,
             discountRate: 1e13,
-            baseFee: 5e5
+            baseFee: 5e5,
+            callbackGasLimit: 50_000,
+            hookData: hex"abcd"
         });
     }
 

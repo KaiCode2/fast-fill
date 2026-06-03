@@ -56,7 +56,7 @@ settles inbound ones, and is deployed on every supported chain.
 
 | Contract | Responsibility |
 |---|---|
-| `FastFillBase` | Order book, status machine, `fill`/`fillFor`, `_settle`, `_payout` fallback, pricing call, pause, ownership, EIP-2612 `selfPermit` + Permit2 pulls + `Multicallable` |
+| `FastFillBase` | Order book, status machine, `fill`/`fillFor`, `_settle`, `_payout` fallback, destination-execution callback (`onFastFill`), pricing call, pause, ownership, EIP-2612 `selfPermit` + Permit2 pulls + `Multicallable` |
 | `FastFillConfig` | Immutable CREATE2 chain registry — per-chain CCTP/LZ addresses, domains, eids, USDC + USD₮0 tokens; the single source the adapters read at call time |
 | `CctpAdapter` | `initiateCCTP`/`initiateCCTPFor` (burn-with-hook) and `settle(message, attestation)` (wraps `receiveMessage`) |
 | `OftAdapter` | `initiateOFT` (`send` with `composeMsg`) and `lzCompose` (LayerZero compose callback) |
@@ -302,7 +302,47 @@ never pausable). Effects (status) are written before any external transfer; `fil
 
 ---
 
-## 9. Configuration & admin
+## 9. Destination executions
+
+An order may carry a destination-execution payload — `hookData` plus a user-signed `callbackGasLimit`.
+When the funds reach the recipient (a relayer's `fill`, or `_settle`'s unfilled branch) **and the
+recipient is a contract**, the adapter calls `IFastFillReceiver.onFastFill(orderId, token, amount,
+hookData)` in the **same atomic frame** as the transfer. Empty `hookData`, or a codeless recipient (EOA
+/ undeployed), skips the call and just delivers the funds. One interface serves both adapters.
+
+```mermaid
+flowchart TB
+    D["recipient delivery (fill / settle-unfilled)"] --> H{"hookData set AND recipient has code?"}
+    H -->|no| P["plain transfer"]
+    H -->|yes| X["atomic frame: transfer + onFastFill{gas: callbackGasLimit}"]
+    X -->|success| OK["funds delivered, execution ran"]
+    X -->|"revert RedirectFunds(dest)"| R["funds delivered to dest"]
+    X -->|"revert otherwise / OOG"| C["funds → claimable[recipient]"]
+```
+
+The failure policy is **governed by the receiver's revert data, not the signed order** — the recipient
+is the user's own contract, so it decides at runtime. This mirrors CCTP v2's atomic-with-delivery hooks
+but is strictly safer: because the transfer and the callback share one revertable frame, a
+deterministically-failing hook can never strand the bridged funds — they always end delivered,
+redirected, or claimable. Hardening:
+
+- **Gas cap.** The call forwards exactly `callbackGasLimit`; the adapter first requires enough gas
+  remains (EIP-150 63/64) so a relayer cannot starve the user's signed budget (else `fill`/`settle`
+  reverts, forcing a retry). The limit is signed — in the order and the Permit2 witness — so the
+  relayer prices it into the base fee and a sponsor cannot alter it.
+- **Return-bomb-safe.** The revert data is copied with a bounded length (enough for `RedirectFunds`),
+  so a receiver cannot grief the relayer with a huge returndata payload.
+- **Reentrancy.** Delivery runs inside the existing `nonReentrant` fill/settle with effects written
+  first, so the receiver cannot re-enter `fill`/`settle`/`claim` (it reverts → funds become claimable).
+- **Atomic claw-back.** If the callback moves funds out and then reverts, the whole frame rolls back,
+  so the receiver cannot keep part of the funds and redirect the rest.
+
+A filled order runs its hook once, at fill; the dust surplus paid to the recipient at settle is a plain
+transfer (no second callback), and the filler reimbursement is never hooked.
+
+---
+
+## 10. Configuration & admin
 
 **All chain config is immutable and lives in [`FastFillConfig`](../src/config/FastFillConfig.sol)** —
 a contract CREATE2-deployed to one address on every chain, holding a per-chain row
@@ -333,7 +373,7 @@ speed / executor of a signed intent.
 
 ---
 
-## 10. Security model
+## 11. Security model
 
 | Vector | Defense |
 |---|---|
@@ -345,6 +385,7 @@ speed / executor of a signed intent.
 | Misconfigured registry | Local domain/eid/token are read live from the bridge contracts and cross-checked against `FastFillConfig`; a mismatch reverts. |
 | Sponsor altering a signed intent | Permit2 witness binds the order intent / orderId **and the opted-into bridge mode** (`bridgeParams`); a tampered order — or a flipped fast/slow / executor option — recovers a different signer and reverts (both proven against real Permit2). |
 | Reentrancy | `nonReentrant` + checks-effects-interactions (status before transfers). |
+| Hostile destination receiver | The `onFastFill` callback is gas-capped, return-bomb-safe, runs behind `nonReentrant` in an atomic transfer+call frame; any failure routes to redirect/claimable — it can never brick the fill/settle, strand funds, or keep funds it wasn't owed. |
 | Recipient/filler revert (e.g. USDC blacklist) | `_payout` falls back to the `claimable` ledger; settlement still completes. |
 | Surplus theft | Surplus is computed inside the authenticated settle and always routed to `order.recipient`; the filler is hard-capped at `outputAmount`. |
 | Underpaying the user on fill | `fill` computes `payout` on-chain and pulls exactly that from the relayer. |

@@ -4,7 +4,7 @@ pragma solidity ^0.8.26;
 import {Test} from "forge-std/Test.sol";
 
 import {CctpAdapter} from "../../../src/adapters/CctpAdapter.sol";
-import {Order, OrderLib} from "../../../src/libraries/OrderLib.sol";
+import {Order, OrderLib, Execution} from "../../../src/libraries/OrderLib.sol";
 import {FillStatus} from "../../../src/interfaces/IFastFill.sol";
 import {MockUSDC} from "../../mocks/MockUSDC.sol";
 import {CctpMessageBuilder} from "../../utils/CctpMessageBuilder.sol";
@@ -81,7 +81,7 @@ contract CctpFastFillHandler is Test {
         vm.startPrank(userA);
         usdc.approve(address(src), amount);
         (bytes32 orderId, uint64 nonce) =
-            src.initiateCCTP(DST_CHAIN, _b32(recip), amount, maxFee, 1000, window, rate, baseFee);
+            src.initiateCCTP(DST_CHAIN, _b32(recip), amount, maxFee, 1000, window, rate, baseFee, Execution(0, ""));
         vm.stopPrank();
 
         Order memory o = Order({
@@ -98,7 +98,9 @@ contract CctpFastFillHandler is Test {
             startTime: start,
             expectedDeliveryTime: start + window,
             discountRate: rate,
-            baseFee: baseFee
+            baseFee: baseFee,
+            callbackGasLimit: 0,
+            hookData: ""
         });
         orders.push(o);
         if (!seen[orderId]) {

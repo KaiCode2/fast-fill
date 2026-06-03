@@ -4,7 +4,7 @@ pragma solidity ^0.8.26;
 import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 
 import {FastFillBase} from "../FastFillBase.sol";
-import {Order, OrderLib} from "../libraries/OrderLib.sol";
+import {Order, OrderLib, Execution} from "../libraries/OrderLib.sol";
 import {AddressCast} from "../libraries/AddressCast.sol";
 import {BurnMessageV2Lib} from "../libraries/BurnMessageV2Lib.sol";
 import {PermitLib} from "../libraries/PermitLib.sol";
@@ -78,6 +78,8 @@ contract CctpAdapter is FastFillBase {
     /// @param deliveryWindow Seconds until the time premium decays to 0; `expectedDeliveryTime` is
     ///                       derived on-chain as `block.timestamp + deliveryWindow`.
     /// @param discountRate Time-premium accrual per second (WAD); `baseFee` is a flat fee on any fill.
+    /// @param exec Optional destination execution: `gasLimit` forwarded to the recipient's `onFastFill`
+    ///             hook + the `data` payload. Empty `data` = deliver funds only, no callback.
     function initiateCCTP(
         uint32 dstChainId,
         bytes32 recipient,
@@ -86,7 +88,8 @@ contract CctpAdapter is FastFillBase {
         uint32 minFinalityThreshold,
         uint64 deliveryWindow,
         uint256 discountRate,
-        uint256 baseFee
+        uint256 baseFee,
+        Execution calldata exec
     ) external whenNotPaused returns (bytes32 orderId, uint64 nonce) {
         if (maxFee >= inputAmount) revert MaxFeeTooHigh(maxFee, inputAmount);
         SafeTransferLib.safeTransferFrom(config.chainConfig(block.chainid).usdc, msg.sender, address(this), inputAmount);
@@ -94,6 +97,8 @@ contract CctpAdapter is FastFillBase {
         Order memory order = _buildOrder(
             msg.sender, dstChainId, recipient, inputAmount, maxFee, deliveryWindow, discountRate, baseFee, nonce
         );
+        order.callbackGasLimit = exec.gasLimit;
+        order.hookData = exec.data;
         _assertCreatable(order);
         orderId = _finishInitiate(order, maxFee, minFinalityThreshold);
     }
@@ -114,6 +119,7 @@ contract CctpAdapter is FastFillBase {
         uint64 deliveryWindow,
         uint256 discountRate,
         uint256 baseFee,
+        Execution calldata exec,
         address from,
         PermitLib.Permit2Data calldata permit
     ) external whenNotPaused returns (bytes32 orderId, uint64 nonce) {
@@ -121,8 +127,10 @@ contract CctpAdapter is FastFillBase {
         nonce = _nextNonce();
         Order memory order =
             _buildOrder(from, dstChainId, recipient, inputAmount, maxFee, deliveryWindow, discountRate, baseFee, nonce);
+        order.callbackGasLimit = exec.gasLimit;
+        order.hookData = exec.data;
         _assertCreatable(order);
-        // Pull AFTER building so the witness binds the order; bind the opted-into bridge mode too.
+        // Pull AFTER building so the witness binds the order (incl. hookData + gas); bind the bridge mode too.
         _pullOrderViaPermit2(order, from, permit, keccak256(abi.encode(maxFee, minFinalityThreshold)));
         orderId = _finishInitiate(order, maxFee, minFinalityThreshold);
     }
@@ -177,7 +185,9 @@ contract CctpAdapter is FastFillBase {
             startTime: uint64(block.timestamp),
             expectedDeliveryTime: uint64(block.timestamp) + deliveryWindow,
             discountRate: discountRate,
-            baseFee: baseFee
+            baseFee: baseFee,
+            callbackGasLimit: 0, // set by the entrypoint after build (keeps this frame's stack shallow)
+            hookData: ""
         });
     }
 

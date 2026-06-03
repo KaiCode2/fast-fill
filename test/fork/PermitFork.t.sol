@@ -4,7 +4,7 @@ pragma solidity ^0.8.26;
 import {ForkBase} from "./ForkBase.sol";
 import {CctpAdapter} from "../../src/adapters/CctpAdapter.sol";
 import {FastFillConfig} from "../../src/config/FastFillConfig.sol";
-import {Order, OrderLib} from "../../src/libraries/OrderLib.sol";
+import {Order, OrderLib, Execution} from "../../src/libraries/OrderLib.sol";
 import {AddressCast} from "../../src/libraries/AddressCast.sol";
 import {PermitLib} from "../../src/libraries/PermitLib.sol";
 import {Addresses} from "../../script/config/Addresses.sol";
@@ -57,14 +57,24 @@ contract PermitForkTest is ForkBase {
         assertEq(orderId, _expectedOrderId(user, recipient, exp), "order built from the signer's exact intent");
     }
 
-    /// @dev The sponsored submit, in its own frame (keeps the test stack shallow under via_ir=false).
+    /// @dev The sponsored submit, factored into its own frame to keep the test body readable.
     function _submitFor(bytes32 recipient, address user, uint64 exp, bytes memory sig)
         internal
         returns (bytes32 orderId)
     {
         vm.prank(relayer);
         (orderId,) = adapter.initiateCCTPFor(
-            BASE_CHAIN, recipient, AMOUNT, 0, 2000, WINDOW, RATE, 0, user, PermitLib.Permit2Data(0, exp, sig)
+            BASE_CHAIN,
+            recipient,
+            AMOUNT,
+            0,
+            2000,
+            WINDOW,
+            RATE,
+            0,
+            Execution(0, ""),
+            user,
+            PermitLib.Permit2Data(0, exp, sig)
         );
     }
 
@@ -82,7 +92,17 @@ contract PermitForkTest is ForkBase {
         vm.prank(relayer);
         vm.expectRevert(); // Permit2 recovers a different signer for the tampered witness -> InvalidSigner
         adapter.initiateCCTPFor(
-            BASE_CHAIN, attackerRecipient, AMOUNT, 0, 2000, WINDOW, RATE, 0, user, PermitLib.Permit2Data(0, exp, sig)
+            BASE_CHAIN,
+            attackerRecipient,
+            AMOUNT,
+            0,
+            2000,
+            WINDOW,
+            RATE,
+            0,
+            Execution(0, ""),
+            user,
+            PermitLib.Permit2Data(0, exp, sig)
         );
     }
 
@@ -102,7 +122,17 @@ contract PermitForkTest is ForkBase {
         vm.prank(relayer);
         vm.expectRevert();
         adapter.initiateCCTPFor(
-            BASE_CHAIN, recipient, AMOUNT, 0, 1000, WINDOW, RATE, 0, user, PermitLib.Permit2Data(0, exp, sig)
+            BASE_CHAIN,
+            recipient,
+            AMOUNT,
+            0,
+            1000,
+            WINDOW,
+            RATE,
+            0,
+            Execution(0, ""),
+            user,
+            PermitLib.Permit2Data(0, exp, sig)
         );
     }
 
@@ -125,7 +155,9 @@ contract PermitForkTest is ForkBase {
             WINDOW,
             RATE,
             0,
-            keccak256(abi.encode(uint256(0), uint32(2000)))
+            keccak256(abi.encode(uint256(0), uint32(2000))),
+            keccak256(""),
+            uint64(0)
         );
         return _signPermit2(userKey, exp, witness);
     }
@@ -146,7 +178,9 @@ contract PermitForkTest is ForkBase {
                 startTime: uint64(block.timestamp),
                 expectedDeliveryTime: exp,
                 discountRate: RATE,
-                baseFee: 0
+                baseFee: 0,
+                callbackGasLimit: 0,
+                hookData: ""
             })
         );
     }
