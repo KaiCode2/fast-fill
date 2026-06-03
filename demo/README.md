@@ -32,6 +32,7 @@ demo/
     api/orders/[id]        lifecycle status
     api/settle/[id]        manual settle / forwarding kick
     api/health             relayer balances / allowances
+    api/rpc/[chainId]      read-only JSON-RPC proxy (keeps the Alchemy key server-side)
   src/lib/                 shared codecs (order id, pricing, Permit2 witness, LZ options) + ABIs
   src/lib/server/          server-only relayer (key, clients, verify, fill, cctp, orchestrator)
   src/components, hooks/   wallet, balances, bridge form, timeline
@@ -60,7 +61,7 @@ CREATE2-deterministic → one address everywhere). Deploy your own only if you w
 ```bash
 cd demo
 cp .env.example .env.local
-# fill in NEXT_PUBLIC_ALCHEMY_API_KEY and RELAYER_PRIVATE_KEY (addresses default to ../DEPLOYMENTS.md)
+# fill in ALCHEMY_API_KEY and RELAYER_PRIVATE_KEY (addresses default to ../DEPLOYMENTS.md)
 ```
 
 **4. Fund + approve the relayer** (ETH + USDC on Arb/Op/Base, USD₮0 on Arb/Op):

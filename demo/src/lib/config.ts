@@ -1,5 +1,5 @@
 import type { Address } from "viem";
-import { alchemyRpcUrl, defaultRpcUrl, DEPLOYED, type SupportedChainId } from "./chains";
+import { DEPLOYED, type SupportedChainId } from "./chains";
 
 /**
  * Client-safe configuration, derived purely from NEXT_PUBLIC_* env vars (so it is identical on
@@ -28,10 +28,17 @@ export function adapterAddress(bridgeType: number): Address {
   return bridgeType === 0 ? adapters.cctp : adapters.oft;
 }
 
-/** A single Alchemy key powers all chains; falls back to the chain's public RPC if unset. */
-export const alchemyApiKey = pub("NEXT_PUBLIC_ALCHEMY_API_KEY");
+/**
+ * RPC always goes through our own `/api/rpc/[chainId]` proxy, which holds the (server-only) Alchemy
+ * key — the browser never sees it. In the browser a relative path resolves against the app origin;
+ * during SSR (rare — wagmi's reads run client-side) we build an absolute URL so a server-side fetch
+ * still resolves. Set `NEXT_PUBLIC_APP_URL` if your deployment serves on a non-localhost origin.
+ */
 export function rpcUrl(chainId: SupportedChainId): string {
-  return alchemyApiKey ? alchemyRpcUrl(chainId, alchemyApiKey) : defaultRpcUrl(chainId);
+  const path = `/api/rpc/${chainId}`;
+  if (typeof window !== "undefined") return path;
+  const origin = pub("NEXT_PUBLIC_APP_URL") ?? `http://localhost:${process.env.PORT ?? 3000}`;
+  return `${origin}${path}`;
 }
 
 /** Hard safety cap (USD, decimal) on a single transfer — this is a real-money demo. */

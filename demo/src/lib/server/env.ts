@@ -7,8 +7,8 @@ import { alchemyRpcUrl, defaultRpcUrl, DEPLOYED, type SupportedChainId } from "@
 export const relayerPrivateKey = process.env.RELAYER_PRIVATE_KEY as Hex | undefined;
 export const relayerConfigured = Boolean(relayerPrivateKey);
 
-/** Server prefers a private ALCHEMY_API_KEY, falling back to the public NEXT_PUBLIC one, then default. */
-const alchemyApiKey = process.env.ALCHEMY_API_KEY ?? process.env.NEXT_PUBLIC_ALCHEMY_API_KEY;
+/** Server-only Alchemy key (never NEXT_PUBLIC); powers both the relayer and the `/api/rpc` proxy. */
+const alchemyApiKey = process.env.ALCHEMY_API_KEY;
 export function serverRpcUrl(chainId: SupportedChainId): string {
   return alchemyApiKey ? alchemyRpcUrl(chainId, alchemyApiKey) : defaultRpcUrl(chainId);
 }
