@@ -30,6 +30,9 @@ pub struct VerifiedOrder {
     pub dst_chain_id: u64,
     pub src_tx_hash: B256,
     pub src_block_number: u64,
+    /// CCTP `mintFee` (USDC base units). `> 0` ⇒ executor-routed (settle via `CctpExecutor.execute`,
+    /// the mint-relay path that pays this fee). `0` ⇒ direct (settle via `CctpAdapter.settle`). OFT: 0.
+    pub mint_fee: U256,
 }
 
 /// The leading `initiate*` args we need (positions are identical for the `*For` variants).
@@ -37,7 +40,8 @@ struct InitiateArgs {
     dst_chain_id: u32,
     recipient: FixedBytes<32>,
     input_amount: U256,
-    fourth: U256, // maxFee (CCTP) or minAmountLD (OFT)
+    fourth: U256,   // maxFee (CCTP) or minAmountLD (OFT)
+    mint_fee: U256, // CCTP executor mint-relay fee (0 for OFT / direct CCTP)
     delivery_window: u64,
     discount_rate: U256,
     base_fee: U256,
@@ -85,8 +89,10 @@ pub async fn reconstruct_and_verify(app: &App, d: &Discovered) -> Result<Verifie
         .output_token(dst_chain_id, bridge_type, oft_id)
         .ok_or_else(|| eyre!("no output token for dst chain {}", dst_chain_id))?;
 
+    // CCTP reserves both the bridge fee (maxFee) and the executor mint-relay fee (mintFee); OFT uses
+    // the signed slippage floor (minAmountLD).
     let output_amount = if bridge_type == BRIDGE_CCTP {
-        args.input_amount - args.fourth
+        args.input_amount - args.fourth - args.mint_fee
     } else {
         args.fourth
     };
@@ -132,6 +138,7 @@ pub async fn reconstruct_and_verify(app: &App, d: &Discovered) -> Result<Verifie
         dst_chain_id,
         src_tx_hash: d.tx_hash,
         src_block_number: d.block_number,
+        mint_fee: args.mint_fee,
     })
 }
 
@@ -166,6 +173,7 @@ fn decode_initiate_inner(bridge_type: u8, data: &[u8]) -> Result<InitiateArgs> {
                 recipient: c.recipient,
                 input_amount: c.inputAmount,
                 fourth: c.maxFee,
+                mint_fee: c.mintFee,
                 delivery_window: c.deliveryWindow,
                 discount_rate: c.discountRate,
                 base_fee: c.baseFee,
@@ -179,6 +187,7 @@ fn decode_initiate_inner(bridge_type: u8, data: &[u8]) -> Result<InitiateArgs> {
                 recipient: c.recipient,
                 input_amount: c.inputAmount,
                 fourth: c.maxFee,
+                mint_fee: c.mintFee,
                 delivery_window: c.deliveryWindow,
                 discount_rate: c.discountRate,
                 base_fee: c.baseFee,
@@ -195,6 +204,7 @@ fn decode_initiate_inner(bridge_type: u8, data: &[u8]) -> Result<InitiateArgs> {
             recipient: c.recipient,
             input_amount: c.inputAmount,
             fourth: c.minAmountLD,
+            mint_fee: U256::ZERO,
             delivery_window: c.deliveryWindow,
             discount_rate: c.discountRate,
             base_fee: c.baseFee,
@@ -208,6 +218,7 @@ fn decode_initiate_inner(bridge_type: u8, data: &[u8]) -> Result<InitiateArgs> {
             recipient: c.recipient,
             input_amount: c.inputAmount,
             fourth: c.minAmountLD,
+            mint_fee: U256::ZERO,
             delivery_window: c.deliveryWindow,
             discount_rate: c.discountRate,
             base_fee: c.baseFee,
@@ -228,20 +239,14 @@ mod tests {
     use alloy::providers::ProviderBuilder;
     use alloy::sol_types::SolEvent;
 
-    /// Golden gate: reconstruct a REAL mainnet CCTP order from its source tx and assert the
-    /// recomputed `orderId` equals the emitted one. Source: DEPLOYMENTS.md CCTP smoke (Base → Arbitrum).
-    /// Network test (public Base RPC) — run with `cargo test -- --ignored` (set RPC_URL_8453 to override).
-    #[tokio::test]
-    #[ignore = "network: requires a Base RPC; run with --ignored"]
-    async fn golden_orderid_base_cctp() {
-        let rpc =
-            std::env::var("RPC_URL_8453").unwrap_or_else(|_| "https://mainnet.base.org".into());
+    /// Reconstruct a REAL mainnet CCTP order from its source tx and assert the recomputed `orderId`
+    /// equals the emitted one — the load-bearing authenticity gate, including the `mintFee` term in
+    /// `outputAmount = inputAmount - maxFee - mintFee`.
+    async fn check_golden(rpc: &str, src_chain_id: u64, tx_hash_str: &str) {
         let provider = ProviderBuilder::new()
             .connect_http(rpc.parse().unwrap())
             .erased();
-        let tx_hash: B256 = "0x4267e424c580a7aa197eb428b5c8f9c7978fb532ccb09d73e0679150ac06943a"
-            .parse()
-            .unwrap();
+        let tx_hash: B256 = tx_hash_str.parse().unwrap();
 
         let receipt = provider
             .get_transaction_receipt(tx_hash)
@@ -279,7 +284,7 @@ mod tests {
         // FastFillConfig is a registry of ALL chains, readable from any chain's deployment.
         let conf = cfg::new(FASTFILL_CONFIG, provider.clone());
         let src_usdc = conf
-            .chainConfig(U256::from(8453u64))
+            .chainConfig(U256::from(src_chain_id))
             .call()
             .await
             .unwrap()
@@ -288,14 +293,14 @@ mod tests {
 
         let order = Order {
             bridgeType: BRIDGE_CCTP,
-            srcChainId: 8453,
+            srcChainId: src_chain_id as u32,
             dstChainId: args.dst_chain_id,
             sender: addr_to_b32(e.sender),
             recipient: args.recipient,
             inputToken: addr_to_b32(src_usdc),
             outputToken: addr_to_b32(dst_usdc),
             inputAmount: args.input_amount,
-            outputAmount: args.input_amount - args.fourth,
+            outputAmount: args.input_amount - args.fourth - args.mint_fee,
             nonce: e.nonce,
             startTime: start_time,
             expectedDeliveryTime: start_time + args.delivery_window,
@@ -310,5 +315,35 @@ mod tests {
             id, e.orderId,
             "reconstructed orderId must equal the emitted OrderCreated.orderId"
         );
+    }
+
+    /// Direct CCTP order (`mintFee = 0`), Base → Arbitrum. Source: DEPLOYMENTS.md smoke.
+    /// Network test — run with `cargo test -- --ignored` (set RPC_URL_8453 to override).
+    #[tokio::test]
+    #[ignore = "network: requires a Base RPC; run with --ignored"]
+    async fn golden_orderid_base_cctp_direct() {
+        let rpc =
+            std::env::var("RPC_URL_8453").unwrap_or_else(|_| "https://mainnet.base.org".into());
+        check_golden(
+            &rpc,
+            8453,
+            "0x4c6b282cde6fc03bcc0c3bc75b40a601aaadf232e789db0643039052a7b790bc",
+        )
+        .await;
+    }
+
+    /// Executor-routed CCTP order (`mintFee > 0`), Arbitrum → Base. Source: DEPLOYMENTS.md smoke.
+    /// Exercises the `outputAmount = inputAmount - maxFee - mintFee` reconstruction.
+    #[tokio::test]
+    #[ignore = "network: requires an Arbitrum RPC; run with --ignored"]
+    async fn golden_orderid_arbitrum_cctp_routed() {
+        let rpc = std::env::var("RPC_URL_42161")
+            .unwrap_or_else(|_| "https://arbitrum-one.publicnode.com".into());
+        check_golden(
+            &rpc,
+            42161,
+            "0x83eef9a71fae6f0057ae954cc9c22221866c469f97deef8c9b398c733aa98504",
+        )
+        .await;
     }
 }

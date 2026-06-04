@@ -1,9 +1,13 @@
-//! Autonomous fast-fill relayer bot.
+//! Autonomous fast-fill relayer bot. Two independent profit roles:
 //!
-//! Watches `OrderCreated` on every source chain, reconstructs + verifies each order, fills the
-//! profitable ones it can cover, and (for CCTP, when the forwarding service is disabled) relays the
-//! Circle attestation on-chain via `settle` to be reimbursed. OFT settlement is auto-delivered by
-//! LayerZero. Live by default; pass `--dry-run` to detect/quote/simulate without sending txs.
+//! 1. Optimistic filling — watch `OrderCreated`, reconstruct + verify each order, and `fill` the
+//!    profitable ones it can cover (reimbursed at settlement).
+//! 2. CCTP mint relaying — for `mintFee > 0` orders using the `CctpExecutor` (the permissionless
+//!    drop-in for Circle's forwarding service), poll Circle's attestation and call
+//!    `CctpExecutor.execute` to mint, earning `mintFee` whenever it covers gas.
+//!
+//! Direct (`mintFee == 0`) CCTP orders it filled settle via `CctpAdapter.settle`; OFT settlement is
+//! auto-delivered by LayerZero. Live by default; pass `--dry-run` to detect/quote/simulate only.
 
 mod app;
 mod cctp;

@@ -7,6 +7,7 @@
 
 // Friendly aliases for the generated contract modules.
 pub use fastfill_bindings::cctp_adapter::CctpAdapter as cctp;
+pub use fastfill_bindings::cctp_executor::CctpExecutor as executor;
 pub use fastfill_bindings::fast_fill_config::FastFillConfig as cfg;
 pub use fastfill_bindings::oft_adapter::OftAdapter as oft;
 pub use fastfill_bindings::oft_adapter_factory::OftAdapterFactory as factory;

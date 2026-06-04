@@ -4,6 +4,7 @@
 //! Do not manually edit these files.
 //! These files may be overwritten by the codegen system at any time.
 pub mod cctp_adapter;
+pub mod cctp_executor;
 pub mod fast_fill_config;
 pub mod oft_adapter;
 pub mod oft_adapter_factory;

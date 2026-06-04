@@ -10,7 +10,11 @@ pub const BRIDGE_OFT: u8 = 1;
 
 // Deployed mainnet contracts — CREATE2-identical on every chain. Source: DEPLOYMENTS.md.
 pub const FASTFILL_CONFIG: Address = address!("aec766479DB174110958Bc45D141A2C5eF693DF5");
-pub const CCTP_ADAPTER: Address = address!("cceeB77d7E4FD660fFd8E501a29A58ec6133cF0E");
+// Executor-enabled CctpAdapter (supports mintFee-routed orders). Replaces the pre-executor
+// historical adapter 0xcceeB77d7E4FD660fFd8E501a29A58ec6133cF0E.
+pub const CCTP_ADAPTER: Address = address!("9FA37faBfA1Fd31Afe5A5F93e1c4Cd986b27bA75");
+// Permissionless CCTP mint-relay singleton — settles `mintFee > 0` orders and pays the relayer.
+pub const CCTP_EXECUTOR: Address = address!("AFc7bBc0B5fD7A4d9b936349cfE991e5bC6E2a80");
 pub const OFT_FACTORY: Address = address!("84Bb5d3142024da8d61CBEE0A4c722a1650fbFcb");
 
 /// Per-order destination-execution gas cap enforced on-chain (`FastFillBase.MAX_CALLBACK_GAS_LIMIT`).
@@ -93,6 +97,13 @@ pub struct Settings {
     pub default_max_size: U256,
     /// Keyed by UPPERCASE symbol. Absent ⇒ disabled.
     pub token_policy: HashMap<String, TokenPolicy>,
+    // --- CCTP mint relay (CctpExecutor) ---
+    /// Relay `mintFee > 0` CCTP mints for the fee (independent of optimistic filling).
+    pub mint_relay_enabled: bool,
+    /// Absolute floor (USDC base units, 6-dp) on `mintFee` before we relay an order we did not fill.
+    pub min_mint_fee: U256,
+    /// ETH price (whole USD) used to value gas when checking mint-relay profitability.
+    pub eth_price_usd: u64,
 }
 
 impl Settings {
@@ -177,6 +188,11 @@ pub fn load(dry_run_flag: bool) -> Result<Settings> {
 
     let dry_run = dry_run_flag || std::env::var("RELAYER_DRY_RUN").ok().as_deref() == Some("1");
 
+    // Mint relay defaults on; disable with RELAYER_MINT_RELAY=0.
+    let mint_relay_enabled = std::env::var("RELAYER_MINT_RELAY").ok().as_deref() != Some("0");
+    let min_mint_fee = U256::from(env_u128("RELAYER_MIN_MINT_FEE", 0));
+    let eth_price_usd = env_u128("RELAYER_ETH_PRICE_USD", 3000) as u64;
+
     Ok(Settings {
         private_key,
         rpc_urls,
@@ -188,5 +204,8 @@ pub fn load(dry_run_flag: bool) -> Result<Settings> {
         attest_timeout_secs: env_u128("RELAYER_ATTEST_TIMEOUT_SECS", 30 * 60) as u64,
         default_max_size,
         token_policy,
+        mint_relay_enabled,
+        min_mint_fee,
+        eth_price_usd,
     })
 }
