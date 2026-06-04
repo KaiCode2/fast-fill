@@ -37,6 +37,9 @@ pub struct Job {
     pub dst_chain_id: u64,
     pub src_tx_hash: B256,
     pub src_cctp_domain: u32,
+    /// CCTP `mintFee` (USDC base units): `> 0` ⇒ executor-routed (settle via `CctpExecutor.execute`,
+    /// which pays this fee to the relayer); `0` ⇒ direct (`CctpAdapter.settle`). OFT: 0.
+    pub mint_fee: U256,
     pub phase: Phase,
     pub filled_by_us: bool,
     pub fill_tx: Option<B256>,

@@ -132,19 +132,27 @@ pub async fn bootstrap(chains: &Chains) -> Result<Registry> {
         let provider = chains.provider(c.chain_id)?;
         let conf = cfg::new(config::FASTFILL_CONFIG, provider.clone());
 
-        let cc = retry!("chainConfig", conf.chainConfig(U256::from(c.chain_id)).call())?;
+        let cc = retry!(
+            "chainConfig",
+            conf.chainConfig(U256::from(c.chain_id)).call()
+        )?;
         if cc.usdc != Address::ZERO {
             reg.usdc.insert(c.chain_id, cc.usdc);
         }
 
         for &oft_id in reg.oft_adapter.keys() {
-            let d = retry!("oftConfig", conf.oftConfig(U256::from(c.chain_id), oft_id).call())?;
+            let d = retry!(
+                "oftConfig",
+                conf.oftConfig(U256::from(c.chain_id), oft_id).call()
+            )?;
             if d.token == Address::ZERO {
                 continue;
             }
-            let decimals =
-                retry!("decimals", IERC20::new(d.token, provider.clone()).decimals().call())
-                    .unwrap_or(18);
+            let decimals = retry!(
+                "decimals",
+                IERC20::new(d.token, provider.clone()).decimals().call()
+            )
+            .unwrap_or(18);
             reg.oft_token.insert(
                 (c.chain_id, oft_id),
                 TokenInfo {
