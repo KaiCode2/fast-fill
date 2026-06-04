@@ -6,7 +6,7 @@ import { useAccount, useChainId, useSignTypedData, useSwitchChain, useWriteContr
 import { cctpAdapterAbi, oftAdapterAbi } from "@/lib/abis/generated";
 import { erc20Abi } from "@/lib/abis/erc20";
 import { erc20PermitAbi } from "@/lib/abis/erc20Permit";
-import { api, type SubmitMode } from "@/lib/api";
+import { api, submitSelfWithRetry, type SubmitMode } from "@/lib/api";
 import { cctpInitiateArgs, oftInitiateArgs, outputAmountOf, type BridgeParams } from "@/lib/bridge";
 import { quoteOftNativeFee } from "@/lib/oftQuote";
 import { PERMIT2, REGISTRY, type SupportedChainId } from "@/lib/chains";
@@ -109,10 +109,16 @@ export function useInitiate() {
     const orderId = (created.args as { orderId: Hex }).orderId;
 
     setState({ phase: "handoff", message: "Notifying the relayer" });
-    try {
-      await api.submitSelf({ txHash, srcChainId: p.srcChainId, forwarding });
-    } catch (e) {
-      console.warn("relayer handoff failed:", e);
+    const handoff = await submitSelfWithRetry(
+      { txHash, srcChainId: p.srcChainId, forwarding },
+      (attempt, total) => {
+        if (attempt > 1) setState({ phase: "handoff", message: `Notifying the relayer (attempt ${attempt}/${total})` });
+      },
+    );
+    if (!handoff.ok) {
+      // Non-fatal: the burn is on-chain and the primary (Rust) relayer discovers it directly — but
+      // surface the reason instead of swallowing it, so a fallback miss is debuggable.
+      console.warn(`fallback relayer handoff failed after ${handoff.attempts} attempts: ${handoff.error}`);
     }
     setState({ phase: "done", message: "Submitted" });
     return { orderId, srcTxHash: txHash };

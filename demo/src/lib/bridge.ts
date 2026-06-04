@@ -1,4 +1,4 @@
-import type { Address, Hex } from "viem";
+import { parseUnits, type Address, type Hex } from "viem";
 import { type SupportedChainId, type TokenSymbol } from "./chains";
 import { addressToBytes32, BRIDGE_CCTP, type Order } from "./order";
 import { getToken } from "./tokens";
@@ -53,6 +53,23 @@ export function suggestMaxFee(amount: bigint): bigint {
   if (amount <= 0n) return 0n;
   const bps2 = amount / 5000n;
   return bps2 > 0n ? bps2 : 1n;
+}
+
+/**
+ * Parse the configured Relay Mint fee (`NEXT_PUBLIC_CCTP_MINT_FEE_USD`, a USD decimal string) into
+ * token base units. Returns `null` for a malformed, empty, or non-positive value. Callers MUST treat
+ * `null` as a misconfiguration and refuse to present the transfer as executor-guaranteed: a zero or
+ * unparseable fee would otherwise silently downgrade a "Relay Mint on" order to the direct settle
+ * path (`mintFee = 0`), so the executor incentive vanishes while the UI still promised delivery.
+ */
+export function parseMintFee(cctpMintFeeUsd: string, decimals: number): bigint | null {
+  if (!/^\d*\.?\d+$/.test(cctpMintFeeUsd)) return null; // reject empty, ".", and non-numeric
+  try {
+    const v = parseUnits(cctpMintFeeUsd as `${number}`, decimals);
+    return v > 0n ? v : null;
+  } catch {
+    return null;
+  }
 }
 
 /**

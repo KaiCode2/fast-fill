@@ -99,3 +99,36 @@ export const api = {
     return (await res.json()) as OrderStatus;
   },
 };
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+// The Next.js relayer is a FALLBACK — the Rust relayer watches OrderCreated on-chain and is primary.
+// We still try hard to hand off the self-submitted burn: (1) a short initial delay lets the backend's
+// RPC index the just-mined tx before it verifies + fills, and (2) we retry on failure so a transient
+// blip (cold start, RPC lag, rate-limit) doesn't silently drop the fallback notification.
+const SELF_HANDOFF_INITIAL_DELAY_MS = 100;
+const SELF_HANDOFF_RETRY_MS = [300, 800, 1500];
+
+export type SelfHandoffResult =
+  | { ok: true; orderId: Hex; status: string }
+  | { ok: false; attempts: number; error: string };
+
+export async function submitSelfWithRetry(
+  req: SelfBridgeRequest,
+  onAttempt?: (attempt: number, total: number) => void,
+): Promise<SelfHandoffResult> {
+  const total = SELF_HANDOFF_RETRY_MS.length + 1;
+  await sleep(SELF_HANDOFF_INITIAL_DELAY_MS);
+  let lastErr = "unknown error";
+  for (let attempt = 1; attempt <= total; attempt++) {
+    onAttempt?.(attempt, total);
+    try {
+      const res = await api.submitSelf(req);
+      return { ok: true, ...res };
+    } catch (e) {
+      lastErr = e instanceof Error ? e.message : String(e);
+      if (attempt < total) await sleep(SELF_HANDOFF_RETRY_MS[attempt - 1]);
+    }
+  }
+  return { ok: false, attempts: total, error: lastErr };
+}

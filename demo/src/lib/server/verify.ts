@@ -4,7 +4,7 @@ import { cctpAdapterAbi, oftAdapterAbi } from "@/lib/abis/generated";
 import { isSupportedChain, type SupportedChainId } from "@/lib/chains";
 import { addressToBytes32, BRIDGE_CCTP, orderIdOf, type Order } from "@/lib/order";
 import { getToken } from "@/lib/tokens";
-import { getBlockWithRetry, pub } from "./clients";
+import { getBlockWithRetry, getReceiptWithRetry, getTransactionWithRetry, pub } from "./clients";
 import { adapterAddressServer } from "./env";
 import { assertOrderAllowed } from "./guards";
 
@@ -57,9 +57,12 @@ export async function reconstructAndVerify(srcChainId: number, txHash: Hex): Pro
   const src = srcChainId as SupportedChainId;
   const client = pub(src);
 
+  // A self-submitted burn is handed off the instant the browser sees it confirmed, which can be
+  // ahead of the backend's (load-balanced) RPC node — so tolerate a brief "not indexed yet" window
+  // (~100ms → 500ms → 1s) before concluding the order isn't real.
   const [receipt, tx] = await Promise.all([
-    client.getTransactionReceipt({ hash: txHash }),
-    client.getTransaction({ hash: txHash }),
+    getReceiptWithRetry(client, txHash),
+    getTransactionWithRetry(client, txHash),
   ]);
   if (receipt.status !== "success") throw new Error("source transaction reverted");
 
