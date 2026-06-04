@@ -9,7 +9,18 @@ A thin **optimistic fill** layer on top of message-based bridges (Circle **CCTP 
 
 > ✅ **Proven on mainnet.** The CCTP path has been run end-to-end on **Base ⇄ Arbitrum** with real USDC and Circle's real attestation service — full transaction record in **[DEMO.md](DEMO.md)**.
 
-📖 **Docs:** [DEMO.md](DEMO.md) (live mainnet walkthrough) · [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (design deep-dive with diagrams) · [DEPLOYMENTS.md](DEPLOYMENTS.md) (live mainnet addresses on Base/OP/ARB).
+📖 **Docs:** [DEMO.md](DEMO.md) (live mainnet walkthrough) · [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (design deep-dive with diagrams) · [DEPLOYMENTS.md](DEPLOYMENTS.md) (live mainnet addresses on Base/OP/ARB) · [demo/](demo/README.md) (interactive web app) · [relayer/](relayer/README.md) (autonomous relayer bot).
+
+## Repository layout
+
+Three pieces — the contracts, an interactive demo, and a relayer bot:
+
+| Path | What |
+|---|---|
+| [`src/`](src) | The fast-fill contracts — CCTP & OFT adapters, the `CctpExecutor`, the immutable config registry, and the supporting libraries. Detailed tree in [Architecture](#architecture) below. |
+| [`demo/`](demo/README.md) | **Interactive Next.js app**, live on Arbitrum / Optimism / Base mainnet: connect a wallet, send a real (capped) transfer, and watch a backend relayer fill it on the destination in seconds. The easiest way to see fast-fill in action. |
+| [`relayer/`](relayer/README.md) | **Autonomous Rust relayer bot** — watches `OrderCreated`, optimistically fills profitable orders, and relays CCTP mints through the executor for the `mintFee`. |
+| [`script/`](script) · [`test/`](test) · [`docs/`](docs) | Foundry deploy scripts · the full test suite (unit / integration / fork / invariant) · design deep-dives ([architecture](docs/ARCHITECTURE.md), [gas](docs/GAS.md), [gateway](docs/GATEWAY.md)). |
 
 ## How it works
 
