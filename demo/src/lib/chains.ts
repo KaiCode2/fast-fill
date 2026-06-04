@@ -17,7 +17,7 @@ export type SupportedChainId = (typeof SUPPORTED_CHAIN_IDS)[number];
 // Env (NEXT_PUBLIC_*) overrides these if set. Source: repo DEPLOYMENTS.md.
 export const DEPLOYED = {
   fastFillConfig: "0xaec766479DB174110958Bc45D141A2C5eF693DF5",
-  cctpAdapter: "0xcceeB77d7E4FD660fFd8E501a29A58ec6133cF0E",
+  cctpAdapter: "0x9FA37faBfA1Fd31Afe5A5F93e1c4Cd986b27bA75",
   oftAdapter: "0x45165aD55c5FADa4AEeD968469dB6e8e85b943Bf",
 } as const;
 

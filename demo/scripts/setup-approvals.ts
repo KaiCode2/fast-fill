@@ -40,8 +40,9 @@ if (!PK) {
 }
 const account = privateKeyToAccount(PK);
 
-// Source: DEPLOYMENTS.md. These CREATE2-deterministic addresses are identical on every deployed chain.
-const CCTP_ADAPTER = "0xcceeB77d7E4FD660fFd8E501a29A58ec6133cF0E" as const satisfies Address;
+// Source: DEPLOYMENTS.md. Executor-enabled CCTP adapter (replaces the pre-executor 0xccee… historical).
+// CREATE2-deterministic — identical on every deployed chain.
+const CCTP_ADAPTER = "0x9FA37faBfA1Fd31Afe5A5F93e1c4Cd986b27bA75" as const satisfies Address;
 const OFT_ADAPTERS = {
   USDT0: "0x45165aD55c5FADa4AEeD968469dB6e8e85b943Bf",
   USDe: "0x27989367741A6662daeFd5CabeC4f40323461778",
@@ -84,35 +85,70 @@ function rpc(id: SupportedChainId): string {
 
 const APPROVE_THRESHOLD = 10n ** 18n; // treat anything below this as "not approved"
 
+async function processChain(id: SupportedChainId): Promise<string[]> {
+  const meta = REGISTRY[id];
+  const transport = http(rpc(id));
+  const pub = createPublicClient({ chain: meta.chain, transport });
+  const wallet = createWalletClient({ account, chain: meta.chain, transport });
+  const lines: string[] = [];
+
+  const native = await pub.getBalance({ address: account.address });
+  lines.push(`# ${meta.name} (${id}) — ${formatUnits(native, 18)} ETH`);
+
+  const approvals: Approval[] = [
+    { token: meta.usdc.address, spender: CCTP_ADAPTER, symbol: "USDC", decimals: meta.usdc.decimals, bridge: "CCTP" },
+    ...(OFT_TOKENS[id] ?? []),
+  ];
+
+  const status = await Promise.all(
+    approvals.map(async (approval) => {
+      const [bal, allowance] = await Promise.all([
+        pub.readContract({ address: approval.token, abi: erc20Abi, functionName: "balanceOf", args: [account.address] }) as Promise<bigint>,
+        pub.readContract({ address: approval.token, abi: erc20Abi, functionName: "allowance", args: [account.address, approval.spender] }) as Promise<bigint>,
+      ]);
+      return { approval, bal, allowance };
+    }),
+  );
+
+  const pending = status.filter((s) => s.allowance < APPROVE_THRESHOLD);
+  for (const s of status) {
+    const tag = s.allowance >= APPROVE_THRESHOLD ? "already approved" : `approving ${s.approval.spender}…`;
+    lines.push(`  ${s.approval.symbol} (${s.approval.bridge}): ${formatUnits(s.bal, s.approval.decimals)} — ${tag}`);
+  }
+
+  if (pending.length === 0) return lines;
+
+  // Manage nonces locally: viem's auto-nonce reads `pending` per call, so back-to-back submissions
+  // can race and collide. Pin a starting nonce and increment per tx so all approvals are in flight
+  // immediately with distinct nonces.
+  let nonce = await pub.getTransactionCount({ address: account.address, blockTag: "pending" });
+  const submissions = pending.map(({ approval }) => {
+    const txNonce = nonce++;
+    return wallet
+      .writeContract({
+        address: approval.token,
+        abi: erc20Abi,
+        functionName: "approve",
+        args: [approval.spender, maxUint256],
+        nonce: txNonce,
+      })
+      .then(async (hash) => {
+        await pub.waitForTransactionReceipt({ hash });
+        return { approval, hash };
+      });
+  });
+  const results = await Promise.all(submissions);
+  for (const { approval, hash } of results) {
+    lines.push(`    ${approval.symbol} approved (${hash})`);
+  }
+  return lines;
+}
+
 async function run() {
   console.log(`Relayer: ${account.address}\n`);
-
-  for (const id of SUPPORTED_CHAIN_IDS) {
-    const meta = REGISTRY[id];
-    const transport = http(rpc(id));
-    const pub = createPublicClient({ chain: meta.chain, transport });
-    const wallet = createWalletClient({ account, chain: meta.chain, transport });
-
-    const native = await pub.getBalance({ address: account.address });
-    console.log(`# ${meta.name} (${id}) — ${formatUnits(native, 18)} ETH`);
-
-    const approvals: Approval[] = [
-      { token: meta.usdc.address, spender: CCTP_ADAPTER, symbol: "USDC", decimals: meta.usdc.decimals, bridge: "CCTP" },
-      ...(OFT_TOKENS[id] ?? []),
-    ];
-
-    for (const { token, spender, symbol, decimals, bridge } of approvals) {
-      const bal = (await pub.readContract({ address: token, abi: erc20Abi, functionName: "balanceOf", args: [account.address] })) as bigint;
-      const allowance = (await pub.readContract({ address: token, abi: erc20Abi, functionName: "allowance", args: [account.address, spender] })) as bigint;
-      if (allowance >= APPROVE_THRESHOLD) {
-        console.log(`  ${symbol} (${bridge}): ${formatUnits(bal, decimals)} — already approved`);
-        continue;
-      }
-      console.log(`  ${symbol} (${bridge}): ${formatUnits(bal, decimals)} — approving ${spender}…`);
-      const hash = await wallet.writeContract({ address: token, abi: erc20Abi, functionName: "approve", args: [spender, maxUint256] });
-      await pub.waitForTransactionReceipt({ hash });
-      console.log(`    approved (${hash})`);
-    }
+  const sections = await Promise.all(SUPPORTED_CHAIN_IDS.map(processChain));
+  for (const lines of sections) {
+    for (const line of lines) console.log(line);
     console.log("");
   }
   console.log("Done. The relayer can now fill on every configured destination.");
