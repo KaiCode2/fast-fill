@@ -6,13 +6,13 @@ import { useAccount, useChainId, useSignTypedData, useSwitchChain, useWriteContr
 import { cctpAdapterAbi, oftAdapterAbi } from "@/lib/abis/generated";
 import { erc20Abi } from "@/lib/abis/erc20";
 import { erc20PermitAbi } from "@/lib/abis/erc20Permit";
-import { oftAbi } from "@/lib/abis/oft";
 import { api, type SubmitMode } from "@/lib/api";
-import { buildOrder, cctpInitiateArgs, oftInitiateArgs, outputAmountOf, type BridgeParams } from "@/lib/bridge";
+import { cctpInitiateArgs, oftInitiateArgs, outputAmountOf, type BridgeParams } from "@/lib/bridge";
+import { quoteOftNativeFee } from "@/lib/oftQuote";
 import { PERMIT2, REGISTRY, type SupportedChainId } from "@/lib/chains";
 import { adapterAddress } from "@/lib/config";
 import { buildExtraOptions, DEFAULT_COMPOSE_GAS, DEFAULT_LZRECEIVE_GAS } from "@/lib/lzOptions";
-import { addressToBytes32, BRIDGE_CCTP, encodeOrder, type Order } from "@/lib/order";
+import { addressToBytes32, BRIDGE_CCTP, type Order } from "@/lib/order";
 import { buildOrderIntentTypedData, cctpBridgeParams, oftBridgeParams, randomPermit2Nonce } from "@/lib/permit2";
 import { buildPermit2612TypedData, splitSignature } from "@/lib/permit2612";
 import { getToken } from "@/lib/tokens";
@@ -61,27 +61,11 @@ export function useInitiate() {
     }
   }
 
+  // The msg.value sent with the OFT initiate: the quoted LayerZero native fee plus a 20% buffer so a
+  // small gas-price drift between quote and send doesn't revert. The preview shows the raw quote.
   async function quoteOftFee(p: BridgeParams, sender: Address): Promise<bigint> {
-    const client = publicClientFor(p.srcChainId);
-    const oft = REGISTRY[p.srcChainId].usdt0Oft!;
-    const adapter = adapterAddress(p.bridgeType);
-    const preview = buildOrder(p, sender, { startTime: secsFromNow(0) });
-    const sendParam = {
-      dstEid: REGISTRY[p.dstChainId].lzEid,
-      to: addressToBytes32(adapter),
-      amountLD: p.amount,
-      minAmountLD: outputAmountOf(p),
-      extraOptions: buildExtraOptions(),
-      composeMsg: encodeOrder(preview),
-      oftCmd: "0x" as Hex,
-    };
-    const fee = (await client.readContract({
-      address: oft,
-      abi: oftAbi,
-      functionName: "quoteSend",
-      args: [sendParam, false],
-    })) as { nativeFee: bigint };
-    return (fee.nativeFee * 12n) / 10n;
+    const nativeFee = await quoteOftNativeFee(p, sender, secsFromNow(0));
+    return (nativeFee * 12n) / 10n;
   }
 
   async function readTokenDomain(token: Address, chainId: SupportedChainId): Promise<{ name: string; version: string }> {
