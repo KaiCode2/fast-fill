@@ -1,4 +1,5 @@
 import { contractsConfigured } from "@/lib/config";
+import { DocLink } from "@/components/docs/DocLink";
 
 /** Shown until the deployed adapter addresses are present in env. */
 export function SetupBanner() {
@@ -12,6 +13,9 @@ export function SetupBanner() {
         <code className="rounded bg-ink px-1">NEXT_PUBLIC_FASTFILL_CONFIG</code> in{" "}
         <code className="rounded bg-ink px-1">demo/.env.local</code> after deploying. See{" "}
         <code className="rounded bg-ink px-1">.env.example</code>. Balances still work without them.
+      </p>
+      <p className="mt-2">
+        <DocLink href="/docs/deployments">Deployment guide &amp; addresses</DocLink>
       </p>
     </div>
   );

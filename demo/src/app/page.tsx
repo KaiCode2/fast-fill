@@ -1,6 +1,7 @@
 import { ConnectBar } from "@/components/ConnectBar";
 import { DemoApp } from "@/components/DemoApp";
 import { SetupBanner } from "@/components/SetupBanner";
+import { DocLink } from "@/components/docs/DocLink";
 
 export default function Page() {
   return (
@@ -14,6 +15,9 @@ export default function Page() {
             relayer optimistically <span className="text-slate-200">fills your transfer on the destination in seconds</span>{" "}
             for a small, user-priced premium — then is reimbursed when the bridge settles. Sign gasless
             intents (EIP-2612 / Permit2) or submit yourself.
+          </p>
+          <p className="mt-3 text-sm">
+            <DocLink href="/docs">Read the docs</DocLink>
           </p>
         </section>
         <SetupBanner />
