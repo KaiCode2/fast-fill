@@ -9,6 +9,7 @@ import {
   FINALITY_FAST,
   FINALITY_FINALIZED,
   outputAmountOf,
+  parseMintFee,
   suggestMaxFee,
   type BridgeParams,
 } from "@/lib/bridge";
@@ -111,7 +112,13 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
   // toggle is off we fall back to the legacy direct-settle path (no executor fee). For OFT the LZ
   // executor always auto-delivers settlement, so forwarding stays on.
   const relayMintActive = bridgeType === BRIDGE_CCTP && relayMint;
-  const mintFee = relayMintActive ? (tryParseUnits(cctpMintFeeUsd, decimals) ?? 0n) : 0n;
+  // When Relay Mint is on, the configured fee MUST parse to a positive amount. A malformed, empty, or
+  // zero `NEXT_PUBLIC_CCTP_MINT_FEE_USD` would otherwise silently downgrade the order to the direct
+  // settle path (mintFee = 0) while the UI still promised executor-guaranteed delivery — so catch it
+  // and block submission rather than mislead. (Off → mintFee 0 is the intended optimistic-only path.)
+  const configuredMintFee = relayMintActive ? parseMintFee(cctpMintFeeUsd, decimals) : 0n;
+  const mintFeeMisconfigured = configuredMintFee === null;
+  const mintFee = configuredMintFee ?? 0n;
   const forwarding = bridgeType === BRIDGE_CCTP ? relayMint : true;
   const baseFee = tryParseUnits(baseFeeStr, decimals) ?? 0n;
 
@@ -151,6 +158,8 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
   else if (amountUsd > maxUsdPerTransfer) errors.push(`Demo cap is ${maxUsdPerTransfer} (real money)`);
   if (!recipient) errors.push("Enter a valid recipient");
   if (bridgeType === BRIDGE_CCTP && amount && maxFee + mintFee >= amount) errors.push("CCTP fees must be < amount");
+  if (mintFeeMisconfigured)
+    errors.push(`Relay Mint is on but the mint fee "${cctpMintFeeUsd}" is invalid — set NEXT_PUBLIC_CCTP_MINT_FEE_USD to a positive amount, or turn off Relay Mint`);
   if (amount && baseFee >= outputAmount) errors.push("baseFee must be < output amount");
   if (!hookDataValid) errors.push("hookData must be 0x-prefixed hex");
   if (hasHook && callbackGasLimit === 0n) errors.push("Set a callback gas limit for the hook");
@@ -293,9 +302,18 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
             <label className="flex h-[38px] cursor-pointer items-center gap-2 rounded-lg border border-edge bg-ink px-3 text-sm transition hover:border-accent/60">
               <input type="checkbox" checked={relayMint} onChange={(e) => setRelayMint(e.target.checked)} />
               <span className="text-slate-300">
-                {relayMint ? `guaranteed · $${Number(cctpMintFeeUsd).toFixed(2)}` : "optimistic only"}
+                {!relayMint
+                  ? "optimistic only"
+                  : mintFeeMisconfigured
+                    ? "fee misconfigured"
+                    : `guaranteed · $${Number(cctpMintFeeUsd).toFixed(2)}`}
               </span>
             </label>
+            {mintFeeMisconfigured && (
+              <p className="mt-1 text-[11px] text-bad">
+                Invalid mint fee config (<code>NEXT_PUBLIC_CCTP_MINT_FEE_USD</code> = &quot;{cctpMintFeeUsd}&quot;).
+              </p>
+            )}
           </div>
         </div>
       )}

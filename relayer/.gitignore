@@ -1,5 +1,7 @@
 /target
 .env
 .env.local
+# but DO commit the example
+!.env.example
 # live-test harness runtime artifacts (relayer logs + run output)
 scripts/.live-test*

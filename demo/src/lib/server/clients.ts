@@ -4,7 +4,10 @@ import {
   createPublicClient,
   createWalletClient,
   http,
+  TransactionNotFoundError,
+  TransactionReceiptNotFoundError,
   type Account,
+  type Hex,
   type PublicClient,
   type WalletClient,
 } from "viem";
@@ -58,6 +61,50 @@ export async function getBlockWithRetry(
     }
   }
   throw lastErr;
+}
+
+/**
+ * Escalating backoff for the brief window where a load-balanced RPC hasn't yet indexed a just-mined
+ * source tx that the client which submitted it already saw confirmed. A browser hands a fresh burn
+ * to the backend faster than the backend's RPC node catches up, so the first `getTransaction*` can
+ * 404 even though the tx is final. ~100ms → 500ms → 1s (≤ ~1.6s total) before giving up.
+ */
+const SOURCE_TX_RETRY_MS = [100, 500, 1000] as const;
+
+async function retryNotFound<T>(
+  fn: () => Promise<T>,
+  isNotFound: (e: unknown) => boolean,
+  schedule: readonly number[],
+): Promise<T> {
+  let lastErr: unknown;
+  for (let i = 0; i <= schedule.length; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      if (!isNotFound(e)) throw e;
+      lastErr = e;
+      if (i < schedule.length) await sleep(schedule[i]);
+    }
+  }
+  throw lastErr;
+}
+
+/** Fetch a tx receipt, retrying the transient "not indexed yet" window (see {@link SOURCE_TX_RETRY_MS}). */
+export function getReceiptWithRetry(client: PublicClient, hash: Hex, schedule: readonly number[] = SOURCE_TX_RETRY_MS) {
+  return retryNotFound(
+    () => client.getTransactionReceipt({ hash }),
+    (e) => e instanceof TransactionReceiptNotFoundError,
+    schedule,
+  );
+}
+
+/** Fetch a tx, retrying the transient "not indexed yet" window (see {@link SOURCE_TX_RETRY_MS}). */
+export function getTransactionWithRetry(client: PublicClient, hash: Hex, schedule: readonly number[] = SOURCE_TX_RETRY_MS) {
+  return retryNotFound(
+    () => client.getTransaction({ hash }),
+    (e) => e instanceof TransactionNotFoundError,
+    schedule,
+  );
 }
 
 export function wallet(chainId: SupportedChainId): WalletClient {
