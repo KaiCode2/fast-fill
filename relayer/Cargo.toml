@@ -1,3 +1,11 @@
 [workspace]
 members = ["bot", "bindings"]
 resolver = "2"
+
+# Release profile for the deployed relayer. `thin` LTO + symbol stripping shrink the binary and
+# trim a little CPU at near-zero extra build cost (kept light so it still builds on a Raspberry Pi;
+# bump to `lto = "fat"` / `codegen-units = 1` if you build on a beefier host). The relayer is
+# network-I/O bound, so these mainly help image size / deploy speed, not poll latency.
+[profile.release]
+lto = "thin"
+strip = true
