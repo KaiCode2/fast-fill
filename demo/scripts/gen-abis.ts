@@ -18,9 +18,23 @@ const CONTRACTS = [
   { file: "FastFillConfig.sol", name: "FastFillConfig", exportName: "fastFillConfigAbi" },
 ];
 
+// The generated modules are committed so the demo builds without Foundry (e.g. on Vercel).
+// When the forge artifacts are absent but those committed copies exist, skip regeneration
+// instead of failing the build.
+const committedAbisExist =
+  existsSync(resolve(genDir, "index.ts")) &&
+  CONTRACTS.every((c) => existsSync(resolve(genDir, `${c.name}.ts`)));
+
 if (!existsSync(outDir)) {
+  if (committedAbisExist) {
+    console.warn(
+      `\n[gen-abis] Foundry artifacts not found at ${outDir}; using committed ABIs in ${genDir}.\n` +
+        `  Run \`forge build\` in the repo root to regenerate them.\n`,
+    );
+    process.exit(0);
+  }
   console.error(
-    `\n[gen-abis] Foundry artifacts not found at ${outDir}.\n` +
+    `\n[gen-abis] Foundry artifacts not found at ${outDir} and no committed ABIs in ${genDir}.\n` +
       `  Run \`forge build\` in the repo root before building the demo.\n`,
   );
   process.exit(1);
