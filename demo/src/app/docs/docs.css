@@ -1,0 +1,9 @@
+/* Docs-specific tweaks layered on top of the highlight.js theme and @tailwindcss/typography.
+   Imported after github-dark.css in the docs layout so these win. */
+
+/* Let the code block's <pre> background show through instead of highlight.js's own dark fill, so
+   code blocks match the app's `ink` panel surface. Token colors still come from the hljs theme. */
+.doc-prose .hljs {
+  background: transparent;
+  color: inherit;
+}

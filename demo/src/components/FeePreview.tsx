@@ -3,6 +3,7 @@
 import { fmtAmount } from "@/lib/format";
 import { DEFAULT_MAX_FEE_RATE, feeOf } from "@/lib/pricing";
 import { PayoutCurve } from "./PayoutCurve";
+import { DocLink } from "./docs/DocLink";
 
 /**
  * Shows what the recipient receives on an *instant* fill (max premium, fillTime == startTime) and
@@ -87,6 +88,9 @@ export function FeePreview({
           {fmtAmount(outputAmount, decimals, 4)} {symbol}
         </span>{" "}
         when the bridge settles (~{deliveryWindow.toString()}s) — at no premium.
+      </p>
+      <p className="mt-2 text-[11px]">
+        <DocLink href="/docs/architecture#5-pricing">How pricing works</DocLink>
       </p>
     </div>
   );
