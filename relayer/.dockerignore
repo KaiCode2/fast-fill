@@ -1,0 +1,18 @@
+# Keep the build context tiny (matters most when building on a Raspberry Pi).
+# The Rust build artifacts are rebuilt inside the image; never ship local ones.
+target/
+**/target/
+
+# Secrets and local runtime artifacts — must never enter the image.
+.env
+.env.*
+scripts/.live-test*
+
+# VCS / editor noise
+.git/
+.gitignore
+**/*.swp
+.DS_Store
+
+# Docs aren't needed to build the binary.
+README.md
