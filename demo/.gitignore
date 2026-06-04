@@ -28,5 +28,5 @@ yarn-error.log*
 .env.production.local
 !.env.example
 
-# generated ABIs (regenerated from ../out by `pnpm gen:abis`)
-/src/lib/abis/generated
+# generated ABIs are committed so the demo builds without Foundry (e.g. on Vercel);
+# `pnpm gen:abis` regenerates them from ../out when forge artifacts are present.
