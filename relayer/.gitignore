@@ -1,3 +1,5 @@
 /target
 .env
 .env.local
+# live-test harness runtime artifacts (relayer logs + run output)
+scripts/.live-test*
