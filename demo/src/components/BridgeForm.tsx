@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { formatUnits, isAddress, parseUnits, type Address } from "viem";
+import { formatUnits, isAddress, parseUnits, type Address, type Hex } from "viem";
 import { useAccount } from "wagmi";
 import type { SubmitMode } from "@/lib/api";
 import {
@@ -13,15 +13,20 @@ import {
   type BridgeParams,
 } from "@/lib/bridge";
 import { REGISTRY, SUPPORTED_CHAIN_IDS, type SupportedChainId, type TokenSymbol } from "@/lib/chains";
-import { contractsConfigured, maxUsdPerTransfer } from "@/lib/config";
+import { cctpMintFeeUsd, contractsConfigured, maxUsdPerTransfer } from "@/lib/config";
 import { fmtAmount } from "@/lib/format";
 import { DEFAULT_MAX_FEE_RATE, linearDiscountRate } from "@/lib/pricing";
 import { bridgeTypeForToken, chainsForToken, destinationsFor, getToken, isRouteSupported } from "@/lib/tokens";
 import { BRIDGE_CCTP } from "@/lib/order";
 import { useBalances } from "@/hooks/useBalances";
 import { useInitiate } from "@/hooks/useInitiate";
+import { useOftFee } from "@/hooks/useOftFee";
 import type { TransferRecord } from "@/hooks/useTransfers";
 import { FeePreview } from "./FeePreview";
+import { InfoTip } from "./InfoTip";
+
+/** hookData must be a 0x-prefixed, whole-byte hex string ("0x" = deliver funds only, no hook). */
+const HEX_RE = /^0x([0-9a-fA-F]{2})*$/;
 
 const MODES: { key: SubmitMode; label: string; hint: string }[] = [
   { key: "standard", label: "Approval Tx", hint: "Approve + send yourself" },
@@ -50,12 +55,15 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
   const [sendToSelf, setSendToSelf] = useState(true);
   const [recipientStr, setRecipientStr] = useState("");
   const [finality, setFinality] = useState<number>(FINALITY_FAST);
+  const [relayMint, setRelayMint] = useState(true); // CCTP "Relay Mint" — guarantee delivery via the executor
   const [mode, setMode] = useState<SubmitMode>("permit2612");
   const [advanced, setAdvanced] = useState(false);
   const [maxFeeStr, setMaxFeeStr] = useState(""); // empty → auto
   const [windowStr, setWindowStr] = useState(""); // empty → auto (from fast/slow)
   const [discountRateStr, setDiscountRateStr] = useState(""); // empty → auto (linear over the window)
   const [baseFeeStr, setBaseFeeStr] = useState("0");
+  const [hookDataStr, setHookDataStr] = useState("0x"); // destination-execution payload ("0x" = none)
+  const [gasLimitStr, setGasLimitStr] = useState(""); // callback gas for the recipient's onFastFill hook
 
   const bridgeType = bridgeTypeForToken(token);
   const decimals = getToken(src, token).decimals;
@@ -98,9 +106,21 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
     return amount ? suggestMaxFee(amount) : 0n;
   }, [bridgeType, finality, maxFeeStr, decimals, amount]);
 
-  // The demo keeps CCTP on the legacy direct-settle path. Non-zero mintFee routes through CctpExecutor.
-  const mintFee = 0n;
+  // "Relay Mint" (CCTP only): a non-zero mintFee routes settlement through the CctpExecutor so the
+  // relayer is paid to guarantee delivery whether or not an optimistic filler shows up. When the
+  // toggle is off we fall back to the legacy direct-settle path (no executor fee). For OFT the LZ
+  // executor always auto-delivers settlement, so forwarding stays on.
+  const relayMintActive = bridgeType === BRIDGE_CCTP && relayMint;
+  const mintFee = relayMintActive ? (tryParseUnits(cctpMintFeeUsd, decimals) ?? 0n) : 0n;
+  const forwarding = bridgeType === BRIDGE_CCTP ? relayMint : true;
   const baseFee = tryParseUnits(baseFeeStr, decimals) ?? 0n;
+
+  // Optional destination execution: a hook payload + the gas budget to run it on the recipient.
+  const hookDataRaw = hookDataStr.trim() || "0x";
+  const hookDataValid = HEX_RE.test(hookDataRaw);
+  const hookData: Hex = hookDataValid ? (hookDataRaw as Hex) : "0x";
+  const hasHook = hookData !== "0x";
+  const callbackGasLimit = gasLimitStr ? BigInt(gasLimitStr) : 0n;
   // Delivery window keys off the bridge speed (CCTP fast vs finalized); the discount rate is derived
   // so the premium decays linearly to zero across that window (no flat/capped tail). Both stay
   // overridable from Advanced.
@@ -111,8 +131,11 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
 
   const params: BridgeParams | null =
     amount && recipient
-      ? { token, bridgeType, srcChainId: src, dstChainId: dst, amount, recipient, maxFee, mintFee, minFinalityThreshold: finality, deliveryWindow, discountRate, baseFee, callbackGasLimit: 0n, hookData: "0x" }
+      ? { token, bridgeType, srcChainId: src, dstChainId: dst, amount, recipient, maxFee, mintFee, minFinalityThreshold: finality, deliveryWindow, discountRate, baseFee, callbackGasLimit, hookData }
       : null;
+
+  // Live LayerZero native send-fee quote (OFT only) for the fee preview.
+  const { fee: lzFee, loading: lzFeeLoading } = useOftFee(params);
 
   const outputAmount = params ? outputAmountOf(params) : 0n;
   const amountUsd = amount ? Number(formatUnits(amount, decimals)) : 0;
@@ -129,6 +152,8 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
   if (!recipient) errors.push("Enter a valid recipient");
   if (bridgeType === BRIDGE_CCTP && amount && maxFee + mintFee >= amount) errors.push("CCTP fees must be < amount");
   if (amount && baseFee >= outputAmount) errors.push("baseFee must be < output amount");
+  if (!hookDataValid) errors.push("hookData must be 0x-prefixed hex");
+  if (hasHook && callbackGasLimit === 0n) errors.push("Set a callback gas limit for the hook");
   if (params && !isRouteSupported(token, src, dst)) errors.push("Unsupported route");
   const canSubmit = errors.length === 0 && state.phase !== "submitting" && state.phase !== "confirming";
 
@@ -137,8 +162,9 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
   async function onSubmit() {
     if (!params) return;
     try {
-      // Settlement (CCTP minting) is always the relayer network's responsibility now — forwarding on.
-      const res = await submit(params, mode, true);
+      // `forwarding` follows the Relay Mint toggle: on → the relayer settles (via the executor when
+      // mintFee > 0); off → the recipient is left to settle the bridge themselves if nobody fills.
+      const res = await submit(params, mode, forwarding);
       onStarted({
         orderId: res.orderId,
         mode,
@@ -150,7 +176,7 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
         outputAmount: outputAmount.toString(),
         recipient: recipient!,
         srcTxHash: res.srcTxHash,
-        forwarding: true,
+        forwarding,
         createdAt: Date.now(),
       });
     } catch {
@@ -255,13 +281,20 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
             </div>
           </div>
           <div>
-            <label className="label">CCTP settlement</label>
-            <label
-              className="flex h-[38px] cursor-not-allowed items-center gap-2 rounded-lg border border-edge bg-ink px-3 text-sm opacity-60"
-              title="Optimistic fill and USDC minting are both handled by the relayer network."
-            >
-              <input type="checkbox" checked readOnly disabled />
-              <span className="text-slate-300">relayer-managed</span>
+            <label className="label flex items-center gap-1">
+              <span>Relay Mint</span>
+              <InfoTip label="What is Relay Mint?">
+                Uses the CCTP executor contract to ensure your funds are delivered on the destination
+                whether or not an optimistic filler shows up — for a flat ${Number(cctpMintFeeUsd).toFixed(2)}{" "}
+                mint fee. Off: settlement falls back to the optimistic filler, and if none fills you
+                settle the bridge yourself.
+              </InfoTip>
+            </label>
+            <label className="flex h-[38px] cursor-pointer items-center gap-2 rounded-lg border border-edge bg-ink px-3 text-sm transition hover:border-accent/60">
+              <input type="checkbox" checked={relayMint} onChange={(e) => setRelayMint(e.target.checked)} />
+              <span className="text-slate-300">
+                {relayMint ? `guaranteed · $${Number(cctpMintFeeUsd).toFixed(2)}` : "optimistic only"}
+              </span>
             </label>
           </div>
         </div>
@@ -275,6 +308,9 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
         baseFee={baseFee}
         decimals={decimals}
         symbol={token}
+        mintFee={mintFee}
+        lzFeeWei={bridgeType === BRIDGE_CCTP ? undefined : lzFee}
+        lzFeeLoading={lzFeeLoading}
       />
 
       {/* Advanced */}
@@ -317,6 +353,37 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
             <div>
               <label className="label">baseFee ({token})</label>
               <input className="input font-mono" value={baseFeeStr} onChange={(e) => setBaseFeeStr(e.target.value)} />
+            </div>
+            <div>
+              <label className="label flex items-center gap-1">
+                <span>callback gas limit</span>
+                <InfoTip label="What is the callback gas limit?">
+                  Gas budgeted to run the recipient&apos;s <code>onFastFill</code> hook on delivery.
+                  Leave at 0 to just deliver funds.
+                </InfoTip>
+              </label>
+              <input
+                className="input font-mono"
+                placeholder="0 (deliver funds only)"
+                value={gasLimitStr}
+                onChange={(e) => setGasLimitStr(e.target.value.replace(/\D/g, ""))}
+                inputMode="numeric"
+              />
+            </div>
+            <div className="col-span-2">
+              <label className="label flex items-center gap-1">
+                <span>hook data (hex)</span>
+                <InfoTip label="What is hook data?">
+                  Payload passed to the recipient&apos;s <code>onFastFill</code> hook for destination
+                  execution. Requires a callback gas limit. <code>0x</code> = deliver funds only.
+                </InfoTip>
+              </label>
+              <input
+                className={`input font-mono ${hookDataValid ? "" : "border-bad focus:border-bad"}`}
+                placeholder="0x"
+                value={hookDataStr}
+                onChange={(e) => setHookDataStr(e.target.value)}
+              />
             </div>
           </div>
         )}

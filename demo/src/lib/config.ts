@@ -43,3 +43,11 @@ export function rpcUrl(chainId: SupportedChainId): string {
 
 /** Hard safety cap (USD, decimal) on a single transfer — this is a real-money demo. */
 export const maxUsdPerTransfer = Number(pub("NEXT_PUBLIC_MAX_USD_PER_TRANSFER") ?? "2");
+
+/**
+ * Flat fee charged when "Relay Mint" is enabled — the relayer routes settlement through the CCTP
+ * executor (a drop-in for Circle's forwarding service) to guarantee delivery even if no optimistic
+ * filler shows up. A DECIMAL dollar amount (e.g. "0.01" = 1¢), NOT wei: it's parsed with the token's
+ * decimals (USDC = 6dp), so "0.01" → 10000 base units. Kept as a string for `parseUnits`.
+ */
+export const cctpMintFeeUsd = pub("NEXT_PUBLIC_CCTP_MINT_FEE_USD") ?? "0.01";

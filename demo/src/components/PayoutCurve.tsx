@@ -63,6 +63,7 @@ export function PayoutCurve({
   decimals,
   symbol,
   maxFeeRate = DEFAULT_MAX_FEE_RATE,
+  mintFee = 0n,
 }: {
   outputAmount: bigint;
   deliveryWindow: bigint;
@@ -71,6 +72,7 @@ export function PayoutCurve({
   decimals: number;
   symbol: string;
   maxFeeRate?: bigint;
+  mintFee?: bigint;
 }) {
   const windowSecs = Number(deliveryWindow);
   if (outputAmount <= 0n || windowSecs <= 0) return null;
@@ -93,8 +95,13 @@ export function PayoutCurve({
 
   const full = toNum(outputAmount);
   const lo = data[0].amount; // instant-fill payout (the lowest point)
-  const pad = full > lo ? (full - lo) * 0.2 : Math.max(full * 0.001, 1e-6);
-  const yDomain: [number, number] = [Math.max(0, lo - pad), full + pad];
+  // The flat CCTP executor fee is already netted out of `outputAmount`; `gross` is what would arrive
+  // without it, so the gap between the two reference lines visualises the executor fee on the curve.
+  const mintFeeNum = mintFee > 0n ? toNum(mintFee) : 0;
+  const gross = full + mintFeeNum;
+  const top = mintFeeNum > 0 ? gross : full;
+  const pad = top > lo ? (top - lo) * 0.2 : Math.max(top * 0.001, 1e-6);
+  const yDomain: [number, number] = [Math.max(0, lo - pad), top + pad];
 
   return (
     <div className="mt-3">
@@ -128,6 +135,20 @@ export function PayoutCurve({
               stroke="#1e2430"
             />
             <Tooltip content={<PayoutTooltip symbol={symbol} />} />
+            {mintFeeNum > 0 && (
+              <ReferenceLine
+                y={gross}
+                stroke="#94a3b8"
+                strokeDasharray="2 3"
+                strokeOpacity={0.55}
+                label={{
+                  value: `mint fee −${fmtAmt(mintFeeNum)}`,
+                  position: "insideTopRight",
+                  fill: "#94a3b8",
+                  fontSize: 10,
+                }}
+              />
+            )}
             <ReferenceLine
               y={full}
               stroke="#3ddc97"
@@ -135,7 +156,7 @@ export function PayoutCurve({
               strokeOpacity={0.7}
               label={{
                 value: `full ${fmtAmt(full)}`,
-                position: "insideTopRight",
+                position: mintFeeNum > 0 ? "insideBottomRight" : "insideTopRight",
                 fill: "#3ddc97",
                 fontSize: 10,
               }}
