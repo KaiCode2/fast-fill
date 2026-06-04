@@ -52,7 +52,9 @@ relayer/
 4. **Settle / mint relay** — poll Circle Iris until `complete`, then:
    - routed (`mintFee > 0`): `CctpExecutor.execute(message, attestation)` — pursued for orders we
      filled (recover capital + earn `mintFee`) and for orders we did not fill when `mintFee` covers
-     the estimated gas (`RELAYER_MIN_MINT_FEE`, `RELAYER_ETH_PRICE_USD`).
+     the estimated gas. Gas is valued in USD using a **live ETH price** (CoinGecko, cached for
+     `RELAYER_ETH_PRICE_TTL_SECS`, default 4h; `RELAYER_ETH_PRICE_USD` is the fallback), gated by
+     `RELAYER_MIN_MINT_FEE`.
    - direct (`mintFee == 0`): `CctpAdapter.settle(message, attestation)`, only for orders we filled.
    - OFT: just watch `getOrder` until the LayerZero executor settles.
 
@@ -83,7 +85,7 @@ Live mode requires a hot wallet funded with the output tokens on the destination
 *filling*; the bot pre-approves each adapter at startup. *Mint relaying* needs only gas (the executor
 pays the bot in USDC). Guards: per-token fill enable list + size cap (`RELAYER_ENABLED_TOKENS`,
 `RELAYER_MAX_*`, default USDC + USDT0 only), `RELAYER_MIN_FEE`, `RELAYER_SRC_CONFIRMATIONS`, and for
-mint relay `RELAYER_MINT_RELAY` / `RELAYER_MIN_MINT_FEE` / `RELAYER_ETH_PRICE_USD`.
+mint relay `RELAYER_MINT_RELAY` / `RELAYER_MIN_MINT_FEE` / `RELAYER_ETH_PRICE_TTL_SECS` / `RELAYER_ETH_PRICE_USD` (fallback).
 
 Deployed addresses (CREATE2-identical on Base / Optimism / Arbitrum; source `DEPLOYMENTS.md`):
 `FastFillConfig 0xaec766…3DF5`, `CctpAdapter 0x9FA37f…bA75` (executor-enabled),

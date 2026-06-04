@@ -155,7 +155,8 @@ pub async fn mint_relay_profitable(
 
     let gas = inst.execute(msg, att).from(relayer).estimate_gas().await?;
     let gas_price = provider.get_gas_price().await?;
-    let gas_cost = gas_cost_usdc6(gas, gas_price, settings.eth_price_usd);
+    let eth_price = settings.eth_price.get().await; // live, TTL-cached
+    let gas_cost = gas_cost_usdc6(gas, gas_price, eth_price);
     Ok((
         relay_is_profitable(mint_fee, gas_cost, settings.min_mint_fee),
         gas_cost,

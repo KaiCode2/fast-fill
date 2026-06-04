@@ -16,6 +16,7 @@ mod config;
 mod fill;
 mod orchestrator;
 mod order;
+mod price;
 mod registry;
 mod sol;
 mod store;

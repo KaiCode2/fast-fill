@@ -1,9 +1,13 @@
 //! Static chain table, deployed contract addresses, and env-driven settings.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
 
 use alloy::primitives::{address, Address, U256};
 use eyre::{eyre, Result};
+
+use crate::price::EthPriceCache;
 
 pub const BRIDGE_CCTP: u8 = 0;
 pub const BRIDGE_OFT: u8 = 1;
@@ -102,8 +106,8 @@ pub struct Settings {
     pub mint_relay_enabled: bool,
     /// Absolute floor (USDC base units, 6-dp) on `mintFee` before we relay an order we did not fill.
     pub min_mint_fee: U256,
-    /// ETH price (whole USD) used to value gas when checking mint-relay profitability.
-    pub eth_price_usd: u64,
+    /// Live (TTL-cached) ETH/USD price used to value gas when checking mint-relay profitability.
+    pub eth_price: Arc<EthPriceCache>,
 }
 
 impl Settings {
@@ -191,7 +195,20 @@ pub fn load(dry_run_flag: bool) -> Result<Settings> {
     // Mint relay defaults on; disable with RELAYER_MINT_RELAY=0.
     let mint_relay_enabled = std::env::var("RELAYER_MINT_RELAY").ok().as_deref() != Some("0");
     let min_mint_fee = U256::from(env_u128("RELAYER_MIN_MINT_FEE", 0));
-    let eth_price_usd = env_u128("RELAYER_ETH_PRICE_USD", 3000) as u64;
+
+    // Live ETH price (cached) to value gas in the profitability check. RELAYER_ETH_PRICE_USD is the
+    // fallback if the fetch fails; RELAYER_ETH_PRICE_TTL_SECS controls cache freshness (default 4h).
+    let eth_price_fallback = env_u128("RELAYER_ETH_PRICE_USD", 3000) as u64;
+    let eth_price_ttl =
+        Duration::from_secs(env_u128("RELAYER_ETH_PRICE_TTL_SECS", 4 * 3600) as u64);
+    let eth_price_url = std::env::var("RELAYER_ETH_PRICE_URL").unwrap_or_else(|_| {
+        "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd".into()
+    });
+    let eth_price = Arc::new(EthPriceCache::new(
+        eth_price_url,
+        eth_price_fallback,
+        eth_price_ttl,
+    ));
 
     Ok(Settings {
         private_key,
@@ -206,6 +223,6 @@ pub fn load(dry_run_flag: bool) -> Result<Settings> {
         token_policy,
         mint_relay_enabled,
         min_mint_fee,
-        eth_price_usd,
+        eth_price,
     })
 }
