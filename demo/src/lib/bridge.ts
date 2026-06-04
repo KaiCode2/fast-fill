@@ -16,6 +16,7 @@ export interface BridgeParams {
   amount: bigint; // inputAmount, base units
   recipient: Address;
   maxFee: bigint; // CCTP fast-transfer fee cap (0 for OFT / finalized)
+  mintFee: bigint; // CCTP executor relay incentive (0 = legacy direct settle path)
   minFinalityThreshold: number; // CCTP only
   deliveryWindow: bigint; // relative seconds
   discountRate: bigint; // WAD per second
@@ -24,9 +25,9 @@ export interface BridgeParams {
   hookData: Hex; // destination-execution payload ("0x" = deliver funds only)
 }
 
-/** Worst-case amount the filler is owed: CCTP nets the fee, OFT is 1:1 (minAmountLD). */
-export function outputAmountOf(p: Pick<BridgeParams, "bridgeType" | "amount" | "maxFee">): bigint {
-  return p.bridgeType === BRIDGE_CCTP ? p.amount - p.maxFee : p.amount;
+/** Worst-case amount the filler is owed: CCTP nets transport + mint relay fees, OFT is 1:1. */
+export function outputAmountOf(p: Pick<BridgeParams, "bridgeType" | "amount" | "maxFee" | "mintFee">): bigint {
+  return p.bridgeType === BRIDGE_CCTP ? p.amount - p.maxFee - p.mintFee : p.amount;
 }
 
 /** A reasonable default CCTP fast-transfer fee cap (~2 bps), with a 1-unit floor. */
@@ -73,13 +74,14 @@ export function execArg(p: BridgeParams) {
   return { gasLimit: p.callbackGasLimit, data: p.hookData } as const;
 }
 
-/** Args for `initiateCCTP(..., baseFee, exec)`. */
+/** Args for `initiateCCTP(..., mintFee, minFinalityThreshold, ..., baseFee, exec)`. */
 export function cctpInitiateArgs(p: BridgeParams) {
   return [
     p.dstChainId,
     addressToBytes32(p.recipient),
     p.amount,
     p.maxFee,
+    p.mintFee,
     p.minFinalityThreshold,
     p.deliveryWindow,
     p.discountRate,

@@ -52,7 +52,7 @@ contract GasBenchTest is Fixtures {
         usdc.approve(address(srcCctp), INPUT);
         vm.prank(user);
         uint256 g0 = gasleft();
-        srcCctp.initiateCCTP(DST_CHAIN, _b32(recipient), INPUT, MAX_FEE, 1000, WINDOW, RATE, 0, Execution(0, ""));
+        srcCctp.initiateCCTP(DST_CHAIN, _b32(recipient), INPUT, MAX_FEE, 0, 1000, WINDOW, RATE, 0, Execution(0, ""));
         used = g0 - gasleft();
     }
 

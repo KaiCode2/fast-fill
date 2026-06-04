@@ -83,7 +83,7 @@ export async function reconstructAndVerify(srcChainId: number, txHash: Hex): Pro
   };
   if (Number(ev.bridgeType) !== bridgeType) throw new Error("bridgeType mismatch (adapter vs event)");
 
-  // Decode the initiate args (positions are identical for the `*For` sponsored variants).
+  // Decode the initiate args. CCTP has an extra `mintFee` after `maxFee`; OFT keeps its original shape.
   const abi = bridgeType === BRIDGE_CCTP ? cctpAdapterAbi : oftAdapterAbi;
   const init = findInitiate(tx.input, abi);
   const a = init.args as readonly unknown[];
@@ -93,11 +93,12 @@ export async function reconstructAndVerify(srcChainId: number, txHash: Hex): Pro
 
   const recipient = a[1] as Hex; // bytes32
   const inputAmount = a[2] as bigint;
-  const deliveryWindow = a[5] as bigint;
-  const discountRate = a[6] as bigint;
-  const baseFee = a[7] as bigint;
-  const exec = a[8] as { gasLimit: bigint; data: Hex }; // Execution{ gasLimit, data }
-  const outputAmount = bridgeType === BRIDGE_CCTP ? inputAmount - (a[3] as bigint) : (a[3] as bigint);
+  const outputAmount =
+    bridgeType === BRIDGE_CCTP ? inputAmount - (a[3] as bigint) - (a[4] as bigint) : (a[3] as bigint);
+  const deliveryWindow = (bridgeType === BRIDGE_CCTP ? a[6] : a[5]) as bigint;
+  const discountRate = (bridgeType === BRIDGE_CCTP ? a[7] : a[6]) as bigint;
+  const baseFee = (bridgeType === BRIDGE_CCTP ? a[8] : a[7]) as bigint;
+  const exec = (bridgeType === BRIDGE_CCTP ? a[9] : a[8]) as { gasLimit: bigint; data: Hex }; // Execution
 
   const symbol = bridgeType === BRIDGE_CCTP ? "USDC" : "USDT0";
   const block = await client.getBlock({ blockNumber: receipt.blockNumber });

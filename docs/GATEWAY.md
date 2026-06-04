@@ -12,6 +12,12 @@ lets a relayer instead keep a single **unified USDC balance** (deposited once in
 liquidity. The goal: a relayer detects an `OrderCreated`, requests a Gateway mint, and **fills the
 order with the freshly-minted USDC in one transaction** — no pre-positioned inventory per chain.
 
+This is separate from `CctpExecutor`. The executor solves **destination CCTP mint liveness** for an
+already-burned transfer by paying `mintFee` to whoever relays `execute(message, attestation)`.
+Gateway solves **optimistic filler inventory** by letting a relayer acquire destination USDC just in
+time before calling `fill(order)`. They can coexist: a relayer may fill via Gateway, while a later
+executor relayer mints and settles the CCTP message if the user opted into `mintFee > 0`.
+
 ## How Circle Gateway works (relevant facts)
 
 - Two contracts (same address across chains): **`GatewayWallet`** (deposit / withdraw / unified

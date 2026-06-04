@@ -6,13 +6,18 @@ import { PERMIT2 } from "./chains";
  * fast-fill `OrderIntent`. Must match `src/libraries/PermitLib.sol` exactly:
  *   - field order/types identical to ORDER_INTENT_TYPEHASH,
  *   - `deliveryWindow` is RELATIVE seconds (not absolute timestamps),
- *   - bridgeParams = keccak256(abi.encode(maxFee, minFinalityThreshold)) for CCTP,
+ *   - bridgeParams = keccak256(abi.encode(maxFee, minFinalityThreshold, mintFee)) for CCTP,
  *                    keccak256(extraOptions) for OFT.
  * Validated against the literal contract strings by `scripts/parity-check.ts`.
  */
 
-export function cctpBridgeParams(maxFee: bigint, minFinalityThreshold: number): Hex {
-  return keccak256(encodeAbiParameters([{ type: "uint256" }, { type: "uint32" }], [maxFee, minFinalityThreshold]));
+export function cctpBridgeParams(maxFee: bigint, minFinalityThreshold: number, mintFee: bigint): Hex {
+  return keccak256(
+    encodeAbiParameters(
+      [{ type: "uint256" }, { type: "uint32" }, { type: "uint256" }],
+      [maxFee, minFinalityThreshold, mintFee],
+    ),
+  );
 }
 
 export function oftBridgeParams(extraOptions: Hex): Hex {

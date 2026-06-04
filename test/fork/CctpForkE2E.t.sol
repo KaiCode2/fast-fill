@@ -5,6 +5,7 @@ import {Vm} from "forge-std/Vm.sol";
 import {console2} from "forge-std/console2.sol";
 import {ForkBase} from "./ForkBase.sol";
 import {CctpAdapter} from "../../src/adapters/CctpAdapter.sol";
+import {CctpExecutor} from "../../src/CctpExecutor.sol";
 import {FastFillConfig} from "../../src/config/FastFillConfig.sol";
 import {Order, OrderLib, Execution} from "../../src/libraries/OrderLib.sol";
 import {AddressCast} from "../../src/libraries/AddressCast.sol";
@@ -39,7 +40,9 @@ contract CctpForkE2ETest is ForkBase {
 
     function test_fork_realBurn_emitsParseableMessage() external {
         if (!_forkMainnetOrSkip()) return;
-        adapter = new CctpAdapter(address(new FastFillConfig()), address(this), 5e15);
+        FastFillConfig config = new FastFillConfig();
+        CctpExecutor executor = new CctpExecutor(address(config), address(this));
+        adapter = new CctpAdapter(address(config), address(this), 5e15, address(executor));
 
         (bytes memory message, uint64 nonce, uint64 start) = _burn();
         Order memory order = _expectedOrder(nonce, start);
@@ -60,8 +63,9 @@ contract CctpForkE2ETest is ForkBase {
         // maxFee = 0, minFinalityThreshold = 2000 => a standard (finalized) transfer, no fast fee.
         // deliveryWindow is relative; expectedDeliveryTime is derived on-chain as start + WINDOW.
         uint256 g0 = gasleft();
-        (_orderIdFromInit, nonce) =
-            adapter.initiateCCTP(BASE_CHAIN, recipient.toBytes32(), AMOUNT, 0, 2000, WINDOW, RATE, 0, Execution(0, ""));
+        (_orderIdFromInit, nonce) = adapter.initiateCCTP(
+            BASE_CHAIN, recipient.toBytes32(), AMOUNT, 0, 0, 2000, WINDOW, RATE, 0, Execution(0, "")
+        );
         // Real end-to-end source gas through fast-fill (vs the mock numbers in test/gas/GasBench).
         console2.log("FORK real initiateCCTP gas (incl. real CCTP burn):", g0 - gasleft());
         vm.stopPrank();

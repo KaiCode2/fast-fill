@@ -1,0 +1,125 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.26;
+
+import {Ownable} from "solady/auth/Ownable.sol";
+import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
+
+import {CallbackExecutor} from "./CallbackExecutor.sol";
+import {BurnMessageV2Lib} from "./libraries/BurnMessageV2Lib.sol";
+import {AddressCast} from "./libraries/AddressCast.sol";
+import {ExecHook, ExecHookLib} from "./libraries/ExecHookLib.sol";
+import {ICctpExecReceiver} from "./interfaces/ICctpExecReceiver.sol";
+import {ITokenMessengerV2} from "./interfaces/cctp/ITokenMessengerV2.sol";
+import {IMessageTransmitterV2} from "./interfaces/cctp/IMessageTransmitterV2.sol";
+import {IFastFillConfig, ChainConfig} from "./interfaces/IFastFillConfig.sol";
+
+/// @title  CctpExecutor
+/// @notice Permissionless, incentivized CCTP v2 mint-relay + hook-executor — a public-good replacement
+///         for a centralized forwarding service. A canonical singleton (CREATE2-identical on every
+///         chain): anyone may relay a destination mint and earn the burner-specified `mintFee` in USDC,
+///         after which the executor forwards the remaining USDC either to a plain recipient
+///         (forward-only) or to a receiver contract whose `onCctpExecute` it calls (hook mode).
+///
+///         Any integrator can use it. A transfer opts in by naming this contract as BOTH the CCTP
+///         `mintRecipient` AND `destinationCaller` (so `execute` is the only way the message can be
+///         consumed — the mint, the relayer payment, and the hook are atomic, and a griefer cannot
+///         consume the message any other way) and putting an `ExecHook` envelope in the `hookData`.
+///
+///         The executor is deliberately generic: it never inspects the `payload` and trusts no field
+///         in it. It forwards the AUTHENTICATED CCTP `sourceDomain`/`sender` to the receiver, which is
+///         responsible for its own authentication (see `ICctpExecReceiver`).
+contract CctpExecutor is CallbackExecutor, Ownable {
+    using AddressCast for bytes32;
+    using AddressCast for address;
+
+    /// @notice The immutable chain registry. Same address on every chain (CREATE2).
+    IFastFillConfig public immutable config;
+
+    /// @notice When true, `execute` is blocked (claim is never blocked). In-flight messages can always
+    ///         be self-redeemed once unpaused; the CCTP message stays valid until consumed.
+    bool public paused;
+
+    error Paused();
+    error ReceiveMessageFailed();
+    error MintRecipientMismatch(bytes32 mintRecipient);
+    error MintFeeExceedsMinted(uint256 mintFee, uint256 minted);
+    error InvalidRefundTo(address refundTo);
+    error HookGasLimitTooHigh(uint64 gasLimit, uint64 maxGasLimit);
+
+    /// @notice A CCTP message was relayed and its envelope executed.
+    /// @param id        keccak256(message) — a unique id for the relayed message.
+    /// @param relayer   `msg.sender`, who earned `mintFee`.
+    /// @param target    The envelope target (forward recipient or receiver contract).
+    /// @param mintFee   USDC paid to the relayer.
+    /// @param forwarded USDC forwarded to `target` (minted minus mintFee).
+    event Executed(
+        bytes32 indexed id, address indexed relayer, address indexed target, uint256 mintFee, uint256 forwarded
+    );
+
+    constructor(address config_, address owner_) {
+        _initializeOwner(owner_);
+        config = IFastFillConfig(config_);
+    }
+
+    modifier whenNotPaused() {
+        if (paused) revert Paused();
+        _;
+    }
+
+    /// @notice Relay a CCTP mint and execute its envelope. Anyone may call; `msg.sender` earns the
+    ///         envelope's `mintFee`. `receiveMessage` enforces that this contract is the
+    ///         `destinationCaller`, so the mint and the execution are atomic and this is the message's
+    ///         only consumption path. If no relayer finds the `mintFee` worthwhile, the burner (or
+    ///         anyone) can self-redeem by calling this and paying the fee to themselves (net zero).
+    function execute(bytes calldata message, bytes calldata attestation) external nonReentrant whenNotPaused {
+        ChainConfig memory lc = config.chainConfig(block.chainid);
+        address transmitter = ITokenMessengerV2(lc.cctpTokenMessenger).localMessageTransmitter();
+
+        // Mint + authenticate. Reverts (and rolls back) on a bad attestation or a used nonce.
+        if (!IMessageTransmitterV2(transmitter).receiveMessage(message, attestation)) revert ReceiveMessageFailed();
+
+        (
+            uint32 sourceDomain,
+            bytes32 messageSender,
+            bytes32 mintRecipient,
+            uint256 amount,
+            uint256 feeExecuted,
+            bytes calldata hookData
+        ) = BurnMessageV2Lib.parse(message);
+
+        if (mintRecipient != address(this).toBytes32()) revert MintRecipientMismatch(mintRecipient);
+
+        // The amount actually minted to us (CCTP deducts feeExecuted at mint). Use only parsed fields.
+        uint256 minted = amount - feeExecuted;
+        ExecHook memory h = ExecHookLib.decode(hookData);
+        if (h.mintFee > minted) revert MintFeeExceedsMinted(h.mintFee, minted);
+        if (h.gasLimit > MAX_CALLBACK_GAS_LIMIT) revert HookGasLimitTooHigh(h.gasLimit, MAX_CALLBACK_GAS_LIMIT);
+
+        address usdc = lc.usdc;
+        bytes32 id = keccak256(message);
+
+        // Pay the relayer first. If the push fails (e.g. blacklisted relayer), revert the whole relay:
+        // the CCTP nonce stays unconsumed and another relayer can retry.
+        if (h.mintFee != 0) SafeTransferLib.safeTransfer(usdc, msg.sender, h.mintFee);
+
+        uint256 forwarded = minted - h.mintFee;
+        address target = h.target.toAddress();
+        address refundTo = h.refundTo.toAddress();
+        if (refundTo == address(0)) refundTo = target;
+        if (refundTo == address(this)) revert InvalidRefundTo(refundTo);
+
+        // gasLimit == 0 => forward-only (deliver USDC to `target`, no call). Otherwise call the
+        // receiver's onCctpExecute in the same atomic frame, passing ONLY authenticated provenance.
+        bytes memory callbackData = h.gasLimit == 0
+            ? bytes("")
+            : abi.encodeCall(ICctpExecReceiver.onCctpExecute, (sourceDomain, messageSender, usdc, forwarded, h.payload));
+
+        _deliverWithHook(id, usdc, target, forwarded, callbackData, h.gasLimit, refundTo);
+
+        emit Executed(id, msg.sender, target, h.mintFee, forwarded);
+    }
+
+    function setPaused(bool newPaused) external onlyOwner {
+        paused = newPaused;
+    }
+}

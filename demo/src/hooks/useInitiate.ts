@@ -246,7 +246,9 @@ export function useInitiate() {
     const outputAmount = outputAmountOf(p);
     const extraOptions = buildExtraOptions();
     const bridgeParams =
-      p.bridgeType === BRIDGE_CCTP ? cctpBridgeParams(p.maxFee, p.minFinalityThreshold) : oftBridgeParams(extraOptions);
+      p.bridgeType === BRIDGE_CCTP
+        ? cctpBridgeParams(p.maxFee, p.minFinalityThreshold, p.mintFee)
+        : oftBridgeParams(extraOptions);
     const hookDataHash = keccak256(p.hookData);
     const nonce = randomPermit2Nonce();
     const deadline = secsFromNow(3600);
@@ -291,6 +293,7 @@ export function useInitiate() {
       hookData: p.hookData,
       callbackGasLimit: p.callbackGasLimit.toString(),
       maxFee: p.maxFee.toString(),
+      mintFee: p.mintFee.toString(),
       minFinalityThreshold: p.minFinalityThreshold,
       lzReceiveGas: DEFAULT_LZRECEIVE_GAS.toString(),
       composeGas: DEFAULT_COMPOSE_GAS.toString(),

@@ -53,7 +53,7 @@ contract PermitTest is Fixtures {
         calls[0] = abi.encodeCall(cctp.selfPermit, (address(usdc), INPUT, deadline, v, r, s));
         calls[1] = abi.encodeCall(
             cctp.initiateCCTP,
-            (DST_CHAIN, _b32(recipient), INPUT, MAX_FEE, 1000, WINDOW, RATE, uint256(0), Execution(0, ""))
+            (DST_CHAIN, _b32(recipient), INPUT, MAX_FEE, uint256(0), 1000, WINDOW, RATE, uint256(0), Execution(0, ""))
         );
 
         // No prior approve() — the permit inside the same tx authorizes the pull.
@@ -80,6 +80,7 @@ contract PermitTest is Fixtures {
             _b32(recipient),
             INPUT,
             MAX_FEE,
+            0,
             1000,
             WINDOW,
             RATE,
@@ -93,7 +94,7 @@ contract PermitTest is Fixtures {
         Order memory burned = OrderLib.decode(tokenMessenger.lastHookData());
         assertEq(burned.sender, _b32(permitUser), "order sender = signer");
         // The witness binds the relative window (WINDOW), the base fee (0), and the bridge mode the
-        // user opted into (maxFee + minFinalityThreshold), so a relayer cannot alter any of them.
+        // user opted into (maxFee + minFinalityThreshold + mintFee), so a relayer cannot alter any of them.
         assertEq(
             MockPermit2(cctp.PERMIT2()).lastWitness(),
             PermitLib.orderWitness(
@@ -105,7 +106,7 @@ contract PermitTest is Fixtures {
                 WINDOW,
                 RATE,
                 0,
-                keccak256(abi.encode(MAX_FEE, uint32(1000))),
+                keccak256(abi.encode(MAX_FEE, uint32(1000), uint256(0))),
                 keccak256(""),
                 uint64(0)
             ),
@@ -126,6 +127,7 @@ contract PermitTest is Fixtures {
             _b32(recipient),
             INPUT,
             MAX_FEE,
+            0,
             1000,
             WINDOW,
             RATE,

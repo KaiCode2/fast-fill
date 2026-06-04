@@ -4,7 +4,9 @@ pragma solidity ^0.8.26;
 import {Fixtures} from "../utils/Fixtures.sol";
 import {Order, OrderLib} from "../../src/libraries/OrderLib.sol";
 import {FastFillBase} from "../../src/FastFillBase.sol";
+import {CallbackExecutor} from "../../src/CallbackExecutor.sol";
 import {IFastFill} from "../../src/interfaces/IFastFill.sol";
+import {ICallbackExecutor} from "../../src/interfaces/ICallbackExecutor.sol";
 import {MockFastFillReceiver} from "../mocks/MockFastFillReceiver.sol";
 
 /// @notice Destination executions: when an order carries `hookData` and the recipient is a contract,
@@ -178,7 +180,7 @@ contract DestinationExecutionTest is Fixtures {
         usdc.mint(relayer, payout);
         vm.startPrank(relayer);
         usdc.approve(address(dstCctp), payout);
-        vm.expectPartialRevert(FastFillBase.InsufficientCallbackGas.selector);
+        vm.expectPartialRevert(CallbackExecutor.InsufficientCallbackGas.selector);
         dstCctp.fill(o);
         vm.stopPrank();
     }
@@ -196,7 +198,7 @@ contract DestinationExecutionTest is Fixtures {
         // The receiver tries to re-enter the adapter; the nonReentrant guard reverts the inner call,
         // so onFastFill reverts and the funds route to the claim ledger.
         receiver.setMode(MockFastFillReceiver.Mode.Reenter);
-        receiver.setReenter(address(dstCctp), abi.encodeCall(IFastFill.claim, (address(usdc))));
+        receiver.setReenter(address(dstCctp), abi.encodeCall(ICallbackExecutor.claim, (address(usdc))));
         Order memory o = _order(address(receiver), 200_000, HOOK);
         uint256 payout = _fill(o);
         assertEq(dstCctp.claimable(address(receiver), address(usdc)), payout, "re-entry blocked => claimable");

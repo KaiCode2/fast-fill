@@ -68,6 +68,7 @@ export interface GaslessBridgeRequest {
   callbackGasLimit: string;
   // CCTP-only:
   maxFee?: string;
+  mintFee?: string;
   minFinalityThreshold?: number;
   // OFT-only (the relayer rebuilds extraOptions from these so keccak256 matches the witness):
   lzReceiveGas?: string;
