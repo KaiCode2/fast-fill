@@ -92,6 +92,7 @@ export async function submitGasless(req: GaslessBridgeRequest): Promise<{ orderI
           req.recipient,
           BigInt(req.inputAmount),
           BigInt(req.maxFee ?? "0"),
+          BigInt(req.mintFee ?? "0"),
           req.minFinalityThreshold ?? 1000,
           BigInt(req.deliveryWindow),
           BigInt(req.discountRate),

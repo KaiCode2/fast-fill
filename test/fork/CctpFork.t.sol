@@ -3,6 +3,7 @@ pragma solidity ^0.8.26;
 
 import {ForkBase} from "./ForkBase.sol";
 import {CctpAdapter} from "../../src/adapters/CctpAdapter.sol";
+import {CctpExecutor} from "../../src/CctpExecutor.sol";
 import {FastFillConfig} from "../../src/config/FastFillConfig.sol";
 import {ChainConfig} from "../../src/interfaces/IFastFillConfig.sol";
 import {ITokenMessengerV2} from "../../src/interfaces/cctp/ITokenMessengerV2.sol";
@@ -26,7 +27,9 @@ contract CctpForkTest is ForkBase {
         address transmitter = ITokenMessengerV2(c.cctpTokenMessenger).localMessageTransmitter();
         assertEq(IMessageTransmitterV2(transmitter).localDomain(), c.cctpDomain, "domain matches live chain");
 
-        CctpAdapter adapter = new CctpAdapter(address(config), address(this), 5e15);
+        CctpExecutor executor = new CctpExecutor(address(config), address(this));
+        CctpAdapter adapter = new CctpAdapter(address(config), address(this), 5e15, address(executor));
         assertEq(address(adapter.config()), address(config), "config wired");
+        assertEq(adapter.cctpExecutor(), address(executor), "executor wired");
     }
 }

@@ -98,6 +98,8 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
     return amount ? suggestMaxFee(amount) : 0n;
   }, [bridgeType, finality, maxFeeStr, decimals, amount]);
 
+  // The demo keeps CCTP on the legacy direct-settle path. Non-zero mintFee routes through CctpExecutor.
+  const mintFee = 0n;
   const baseFee = tryParseUnits(baseFeeStr, decimals) ?? 0n;
   // Delivery window keys off the bridge speed (CCTP fast vs finalized); the discount rate is derived
   // so the premium decays linearly to zero across that window (no flat/capped tail). Both stay
@@ -109,7 +111,7 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
 
   const params: BridgeParams | null =
     amount && recipient
-      ? { token, bridgeType, srcChainId: src, dstChainId: dst, amount, recipient, maxFee, minFinalityThreshold: finality, deliveryWindow, discountRate, baseFee, callbackGasLimit: 0n, hookData: "0x" }
+      ? { token, bridgeType, srcChainId: src, dstChainId: dst, amount, recipient, maxFee, mintFee, minFinalityThreshold: finality, deliveryWindow, discountRate, baseFee, callbackGasLimit: 0n, hookData: "0x" }
       : null;
 
   const outputAmount = params ? outputAmountOf(params) : 0n;
@@ -125,7 +127,7 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
   if (!amount || amount <= 0n) errors.push("Enter an amount");
   else if (amountUsd > maxUsdPerTransfer) errors.push(`Demo cap is ${maxUsdPerTransfer} (real money)`);
   if (!recipient) errors.push("Enter a valid recipient");
-  if (bridgeType === BRIDGE_CCTP && amount && maxFee >= amount) errors.push("maxFee must be < amount");
+  if (bridgeType === BRIDGE_CCTP && amount && maxFee + mintFee >= amount) errors.push("CCTP fees must be < amount");
   if (amount && baseFee >= outputAmount) errors.push("baseFee must be < output amount");
   if (params && !isRouteSupported(token, src, dst)) errors.push("Unsupported route");
   const canSubmit = errors.length === 0 && state.phase !== "submitting" && state.phase !== "confirming";

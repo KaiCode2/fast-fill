@@ -7,17 +7,21 @@ How much gas the fast-fill adapters consume, and — the question that matters f
 
 | Operation | fast-fill adds (overhead) | Notes |
 |---|---:|---|
-| **CCTP initiate** (`initiateCCTP`) vs direct `depositForBurnWithHook` | **≈ 92k gas** | pull funds into the adapter, build + hash the order, assign the nonce, live domain cross-check, `OrderCreated` |
-| **CCTP settle** (`settle`) vs direct `receiveMessage` | **≈ 64k gas** | re-parse the authenticated message, 3 auth checks, write the order record, disburse to filler/recipient |
-| **OFT initiate** (`initiateOFT`) vs direct `oft.send` | **≈ 74k gas** | same shape as CCTP initiate (token + eid cross-check instead of domain) |
-| **CCTP `fill`** | **≈ 63k gas (absolute)** | a fast-fill primitive — no bridge equivalent |
-| **OFT settle** (`lzCompose`) | **≈ 47k gas (absolute)** | the compose callback *is* the settle on OFT; no bridge equivalent |
+| **CCTP initiate** (`initiateCCTP`, `mintFee = 0`) vs direct `depositForBurnWithHook` | **≈ 88k gas** | pull funds into the adapter, build + hash the order, assign the nonce, live domain cross-check, `OrderCreated` |
+| **CCTP settle** (`settle`) vs direct `receiveMessage` | **≈ 60k gas** | re-parse the authenticated message, 3 auth checks, write the order record, disburse to filler/recipient |
+| **OFT initiate** (`initiateOFT`) vs direct `oft.send` | **≈ 71k gas** | same shape as CCTP initiate (token + eid cross-check instead of domain) |
+| **CCTP `fill`** | **≈ 61k gas (absolute)** | a fast-fill primitive — no bridge equivalent |
+| **OFT settle** (`lzCompose`) | **≈ 44k gas (absolute)** | the compose callback *is* the settle on OFT; no bridge equivalent |
 
-The overhead is small relative to a cross-chain transfer: a real CCTP burn through the adapter costs
-**217,216 gas end-to-end** on an Ethereum mainnet fork (measured below), of which the bridge itself is
+The direct-path overhead is small relative to a cross-chain transfer: a real CCTP burn through the adapter costs
+**213,959 gas end-to-end** on an Ethereum mainnet fork (measured below), of which the bridge itself is
 the large majority. fast-fill never adds a second message or escrow — it rides the bridge's own
 authenticated channel. (Numbers are with the IR pipeline, `via_ir = true`; a destination-execution hook
 is opt-in and adds nothing when `hookData` is empty.)
+
+`mintFee > 0` CCTP orders route settlement through `CctpExecutor.execute` instead of `CctpAdapter.settle`.
+That path adds one USDC transfer to the mint relayer plus the executor envelope decode and hook dispatch;
+it is covered by `test/integration/CctpExecutor.t.sol` but is not yet included in this overhead bench.
 
 ## Methodology
 
@@ -50,18 +54,18 @@ off `--gas-report`, whose call tracing inflates every number):
 
 ```
 --- CCTP ---
-initiateCCTP (fast-fill)        : 110,870
+initiateCCTP (fast-fill)        : 106,215
 depositForBurnWithHook (direct) :  18,712
-  => initiate OVERHEAD          :  92,158
-fill (fast-fill only)           :  63,274
-settle unfilled (fast-fill)     :  91,772
+  => initiate OVERHEAD          :  87,503
+fill (fast-fill only)           :  61,200
+settle unfilled (fast-fill)     :  88,083
 receiveMessage (direct)         :  27,691
-  => settle OVERHEAD            :  64,081
+  => settle OVERHEAD            :  60,392
 --- OFT ---
-initiateOFT (fast-fill)         :  92,774
+initiateOFT (fast-fill)         :  89,769
 oft.send (direct)               :  18,616
-  => initiate OVERHEAD          :  74,158
-lzCompose settle (fast-fill)    :  47,089
+  => initiate OVERHEAD          :  71,153
+lzCompose settle (fast-fill)    :  43,656
 ```
 
 > The absolute mock numbers are **illustrative only** — the real CCTP/LayerZero contracts cost far
@@ -72,7 +76,7 @@ lzCompose settle (fast-fill)    :  47,089
 From `FOUNDRY_PROFILE=fork forge test --match-path test/fork/CctpForkE2E.t.sol -vv` (requires an RPC):
 
 ```
-FORK real initiateCCTP gas (incl. real CCTP burn): 217,216
+FORK real initiateCCTP gas (incl. real CCTP burn): 213,959
 ```
 
 This is the full source-side cost a user pays to start a transfer through fast-fill, real CCTP burn
@@ -84,9 +88,11 @@ Both adapters are well under the 24,576-byte EIP-170 limit (`forge build --sizes
 
 | Contract | Runtime size | Margin |
 |---|---:|---:|
-| `CctpAdapter` | 17,245 B | 7,331 B |
-| `OftAdapter` | 17,397 B | 7,179 B |
-| `FastFillConfig` | 930 B | 23,646 B |
+| `CctpAdapter` | 18,452 B | 6,124 B |
+| `CctpExecutor` | 6,278 B | 18,298 B |
+| `OftAdapter` | 17,662 B | 6,914 B |
+| `OftAdapterFactory` | 19,543 B | 5,033 B |
+| `FastFillConfig` | 1,785 B | 22,791 B |
 
 ## Reproduce
 

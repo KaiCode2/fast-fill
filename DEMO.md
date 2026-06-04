@@ -5,6 +5,10 @@ deployed on Base and Arbitrum, three real $1 transfers, settled through Circle's
 service and `MessageTransmitterV2`. All amounts are in USDC base units (6 decimals; `1,000,000` = $1).
 
 > Prototype, unaudited. Run with ~$5 of USDC for demonstration only.
+>
+> This historical demo predates `CctpExecutor`. It demonstrates the direct CCTP adapter settlement
+> path that is still used when `mintFee == 0`. The executor-routed path (`mintFee > 0`) has since been
+> deployed and smoke-tested; see [DEPLOYMENTS.md](DEPLOYMENTS.md#smoke-tests).
 
 ## Deployments
 
@@ -78,9 +82,10 @@ gets the funds when CCTP settles, at no premium.
 
 ## How it was reproduced
 
-> Note: this run predates the config-registry refactor, so the deploy/wire steps below reflect the
-> original per-instance setters. The current flow deploys one immutable `FastFillConfig` (CREATE2)
-> and adapters that need no wiring — see [README → Deploy](README.md#deploy). The fill/attest/settle
+> Note: this run predates the config-registry refactor and the CCTP Executor, so the deploy/wire steps
+> below reflect the original per-instance setters. The current flow deploys one immutable
+> `FastFillConfig` (CREATE2), then `CctpExecutor`, then the CCTP adapter with the executor address
+> baked in — see [README → Deploy](README.md#deploy). The direct `mintFee == 0` fill/attest/settle
 > mechanics are unchanged.
 
 1. **Deploy** `CctpAdapter` on each chain (`forge create`, constructor: owner, maxFeeRate,
@@ -88,22 +93,27 @@ gets the funds when CCTP settles, at no premium.
 2. **Wire** each: `setDomain`, `setRemoteAdapter`, `setRemoteUsdc` (addresses in
    [`script/config/Addresses.sol`](script/config/Addresses.sol)).
 3. **Initiate** on the source: approve the adapter, then `initiateCCTP(dstChainId, recipient,
-   amount, maxFee, minFinalityThreshold, deliveryWindow, discountRate, baseFee)` — `minFinalityThreshold`
-   is 1000 (fast) or 2000 (finalized); `deliveryWindow` is relative seconds; `baseFee` is the flat fee
-   (0 for none). (This historical run predated the relative-window + base-fee additions.)
+   amount, maxFee, mintFee, minFinalityThreshold, deliveryWindow, discountRate, baseFee, exec)` —
+   `mintFee = 0` uses the direct `settle` path shown here; `mintFee > 0` routes settlement through
+   `CctpExecutor.execute`. `minFinalityThreshold` is 1000 (fast) or 2000 (finalized);
+   `deliveryWindow` is relative seconds; `baseFee` is the flat optimistic-fill fee (0 for none).
+   (This historical run predated the relative-window + base-fee + destination-execution additions.)
 4. **(optional) Fill** on the destination before settlement: relayer approves the adapter and calls
    `fill(order)`.
 5. **Attest:** poll Circle's API
    `https://iris-api.circle.com/v2/messages/{srcDomain}?transactionHash={burnTx}` until
    `status == complete`.
-6. **Settle** on the destination: `settle(message, attestation)` (wraps the real `receiveMessage`).
+6. **Settle** on the destination, direct path: `settle(message, attestation)` (wraps the real
+   `receiveMessage`). Executor-routed orders instead call `CctpExecutor.execute(message, attestation)`.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how the contracts work, and
 [test/fork/CctpForkE2E.t.sol](test/fork/CctpForkE2E.t.sol) for the fork-based dry-run that validated
 the source + message parsing against the real CCTP contracts before any funds were spent.
 
-## Not yet demonstrated live
+## Additional live coverage
 
-The **OFT (LayerZero)** path is proven in the local + mock harness and is wired the same way, but a
-live OFT demo additionally requires deploying a demo OFT on both chains and configuring the
-LayerZero peers + DVN/executor security stack. Tracked as a follow-up.
+The **CctpExecutor-routed CCTP path** has now been demonstrated with live USDC for both unfilled and
+optimistically filled orders; see [DEPLOYMENTS.md](DEPLOYMENTS.md#smoke-tests). The **OFT (LayerZero)**
+path is proven in the local + mock harness and is wired the same way, but a live OFT demo additionally
+requires deploying a demo OFT on both chains and configuring the LayerZero peers + DVN/executor security
+stack. Tracked as follow-up work.

@@ -110,7 +110,7 @@ const sample: Sample = {
   deliveryWindow: 600n,
   discountRate: 10_000_000_000_000n,
   baseFee: 0n,
-  bridgeParams: cctpBridgeParams(200n, 1000),
+  bridgeParams: cctpBridgeParams(200n, 1000, 0n),
   hookDataHash: keccak256("0x"),
   callbackGasLimit: 0n,
   nonce: 12345n,

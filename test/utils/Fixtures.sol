@@ -4,8 +4,10 @@ pragma solidity ^0.8.26;
 import {Test} from "forge-std/Test.sol";
 
 import {CctpAdapter} from "../../src/adapters/CctpAdapter.sol";
+import {CctpExecutor} from "../../src/CctpExecutor.sol";
 import {OftAdapter} from "../../src/adapters/OftAdapter.sol";
 import {Order, OrderLib} from "../../src/libraries/OrderLib.sol";
+import {ExecHook, ExecHookLib} from "../../src/libraries/ExecHookLib.sol";
 import {AddressCast} from "../../src/libraries/AddressCast.sol";
 import {ChainConfig, OftDeployment} from "../../src/interfaces/IFastFillConfig.sol";
 import {OftId} from "../../src/libraries/OftId.sol";
@@ -55,6 +57,7 @@ abstract contract Fixtures is Test {
     MockTokenMessengerV2 internal tokenMessenger; // alias = messengerSrc (where initiate records the burn)
     MockMessageTransmitterV2 internal transmitter; // alias = transmitterDst (where settle mints)
     MockFastFillConfig internal cctpConfig;
+    CctpExecutor internal cctpExec; // canonical mint-relay executor (routed mintFee > 0 path)
     CctpAdapter internal cctp;
     CctpAdapter internal srcCctp; // alias = cctp
     CctpAdapter internal dstCctp; // alias = cctp
@@ -84,7 +87,8 @@ abstract contract Fixtures is Test {
         cctpConfig.set(SRC_CHAIN, ChainConfig(true, SRC_DOMAIN, 0, address(usdc), address(messengerSrc)));
         cctpConfig.set(DST_CHAIN, ChainConfig(true, DST_DOMAIN, 0, address(usdc), address(messengerDst)));
 
-        cctp = new CctpAdapter(address(cctpConfig), owner, MAX_FEE_RATE);
+        cctpExec = new CctpExecutor(address(cctpConfig), owner);
+        cctp = new CctpAdapter(address(cctpConfig), owner, MAX_FEE_RATE, address(cctpExec));
         srcCctp = cctp;
         dstCctp = cctp;
     }
@@ -194,6 +198,39 @@ abstract contract Fixtures is Test {
                 maxFee: order.inputAmount - order.outputAmount,
                 feeExecuted: feeExecuted,
                 hookData: OrderLib.encode(order)
+            })
+        );
+    }
+
+    /// @notice Build a CCTP message that settles `order` via the ROUTED path (`cctpExec.execute`): the
+    ///         executor is the mintRecipient + destinationCaller, and the hookData is an `ExecHook`
+    ///         envelope carrying `mintFee` and the encoded order, targeting the adapter. `messageSender`
+    ///         is the adapter (the burner), so the adapter's anti-forgery check passes.
+    function _cctpRoutedMessage(Order memory order, uint256 mintFee, uint256 feeExecuted, bytes32 nonce)
+        internal
+        view
+        returns (bytes memory)
+    {
+        ExecHook memory h = ExecHook({
+            mintFee: mintFee,
+            target: address(cctp).toBytes32(),
+            gasLimit: order.callbackGasLimit + 350_000, // matches CctpAdapter.SETTLE_GAS_OVERHEAD
+            refundTo: order.recipient,
+            payload: OrderLib.encode(order)
+        });
+        return CctpMessageBuilder.build(
+            CctpMessageBuilder.Msg({
+                sourceDomain: SRC_DOMAIN,
+                destinationDomain: DST_DOMAIN,
+                nonce: nonce,
+                destinationCaller: address(cctpExec).toBytes32(),
+                burnToken: address(usdc).toBytes32(),
+                mintRecipient: address(cctpExec).toBytes32(),
+                amount: order.inputAmount,
+                messageSender: address(cctp).toBytes32(),
+                maxFee: order.inputAmount - order.outputAmount - mintFee,
+                feeExecuted: feeExecuted,
+                hookData: ExecHookLib.encode(h)
             })
         );
     }

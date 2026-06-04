@@ -3,6 +3,7 @@ pragma solidity ^0.8.26;
 
 import {ForkBase} from "./ForkBase.sol";
 import {CctpAdapter} from "../../src/adapters/CctpAdapter.sol";
+import {CctpExecutor} from "../../src/CctpExecutor.sol";
 import {FastFillConfig} from "../../src/config/FastFillConfig.sol";
 import {Order, OrderLib, Execution} from "../../src/libraries/OrderLib.sol";
 import {AddressCast} from "../../src/libraries/AddressCast.sol";
@@ -40,9 +41,15 @@ contract PermitForkTest is ForkBase {
     address usdc = Addresses.USDC_ETHEREUM;
     address relayer = makeAddr("sponsoringRelayer");
 
+    function _deployAdapter() internal returns (CctpAdapter) {
+        FastFillConfig config = new FastFillConfig();
+        CctpExecutor executor = new CctpExecutor(address(config), address(this));
+        return new CctpAdapter(address(config), address(this), 5e15, address(executor));
+    }
+
     function test_fork_sponsoredInitiate_realPermit2_pullsFromSigner() external {
         if (!_forkMainnetOrSkip()) return;
-        adapter = new CctpAdapter(address(new FastFillConfig()), address(this), 5e15);
+        adapter = _deployAdapter();
 
         (address user, uint256 userKey) = makeAddrAndKey("intentSigner");
         _fund(user);
@@ -68,6 +75,7 @@ contract PermitForkTest is ForkBase {
             recipient,
             AMOUNT,
             0,
+            0,
             2000,
             WINDOW,
             RATE,
@@ -80,7 +88,7 @@ contract PermitForkTest is ForkBase {
 
     function test_fork_sponsoredInitiate_tamperedOrder_rejected() external {
         if (!_forkMainnetOrSkip()) return;
-        adapter = new CctpAdapter(address(new FastFillConfig()), address(this), 5e15);
+        adapter = _deployAdapter();
 
         (address user, uint256 userKey) = makeAddrAndKey("intentSigner");
         _fund(user);
@@ -96,6 +104,7 @@ contract PermitForkTest is ForkBase {
             attackerRecipient,
             AMOUNT,
             0,
+            0,
             2000,
             WINDOW,
             RATE,
@@ -108,7 +117,7 @@ contract PermitForkTest is ForkBase {
 
     function test_fork_sponsoredInitiate_tamperedBridgeMode_rejected() external {
         if (!_forkMainnetOrSkip()) return;
-        adapter = new CctpAdapter(address(new FastFillConfig()), address(this), 5e15);
+        adapter = _deployAdapter();
 
         (address user, uint256 userKey) = makeAddrAndKey("intentSigner");
         _fund(user);
@@ -125,6 +134,7 @@ contract PermitForkTest is ForkBase {
             BASE_CHAIN,
             recipient,
             AMOUNT,
+            0,
             0,
             1000,
             WINDOW,
@@ -155,7 +165,7 @@ contract PermitForkTest is ForkBase {
             WINDOW,
             RATE,
             0,
-            keccak256(abi.encode(uint256(0), uint32(2000))),
+            keccak256(abi.encode(uint256(0), uint32(2000), uint256(0))),
             keccak256(""),
             uint64(0)
         );

@@ -21,21 +21,29 @@ flowchart TB
     subgraph BASE["FastFillBase (abstract)"]
         OB["order book + status machine"]
         FILL["fill() · fillFor() (Permit2)"]
-        SET["_settle() + _payout (pull-payment fallback)"]
+        SET["_settle()"]
         PMT["selfPermit (2612) · Permit2 witness pulls · Multicallable"]
         ADM["admin: pause, Ownable, maxFeeRate"]
     end
+    subgraph CB["CallbackExecutor (abstract)"]
+        PAY["_payout + claim ledger"]
+        HOOK["atomic transfer + callback / redirect"]
+    end
 
     CA["CctpAdapter<br/>initiateCCTP[For]() · settle(message, attestation)"]
+    CE["CctpExecutor<br/>execute(message, attestation)<br/>forward-only / hook mode"]
     OA["OftAdapter<br/>initiateOFT[For]() · lzCompose()"]
 
     CA -- inherits --> BASE
     OA -- inherits --> BASE
+    BASE -- inherits --> CB
+    CE -- inherits --> CB
 
     CFG["FastFillConfig<br/>immutable CREATE2 registry<br/>(domains/eids/tokens per chain)"]
     OL["OrderLib<br/>orderId = keccak256(abi.encode(order))"]
     PL["PricingLib<br/>flat baseFee + time-decay premium (WAD, capped)"]
     BL["BurnMessageV2Lib<br/>parse CCTP v2 message"]
+    EL["ExecHookLib<br/>CctpExecutor envelope"]
     CC["OFTComposeMsgCodec<br/>decode LZ compose"]
     AC["AddressCast"]
 
@@ -43,8 +51,12 @@ flowchart TB
     BASE --> PL
     BASE --> AC
     CA -- "reads at call time" --> CFG
+    CE -- "reads at call time" --> CFG
     OA -- "reads at call time" --> CFG
     CA --> BL
+    CA --> EL
+    CE --> BL
+    CE --> EL
     OA --> CC
 ```
 
@@ -58,15 +70,18 @@ initiates outbound transfers *and* settles inbound ones, and is deployed on ever
 
 | Contract | Responsibility |
 |---|---|
-| `FastFillBase` | Order book, status machine, `fill`/`fillFor`, `_settle`, `_payout` fallback, destination-execution callback (`onFastFill`), pricing call, pause, ownership, EIP-2612 `selfPermit` + Permit2 pulls + `Multicallable` |
+| `CallbackExecutor` | Shared transfer+callback substrate: `_payout` fallback, `claim`/`claimable`, atomic transfer+hook execution, redirect parsing, return-data bounding, callback gas checks |
+| `FastFillBase` | Order book, status machine, `fill`/`fillFor`, `_settle`, fast-fill destination-execution callback (`onFastFill`), pricing call, pause, ownership, EIP-2612 `selfPermit` + Permit2 pulls + `Multicallable` |
 | `FastFillConfig` | Immutable CREATE2 chain registry — per-chain CCTP/LZ transport (`chainConfig`) plus each OFT's `(oft, token)` keyed by `(chainId, oftId)` (`oftConfig`); the single source the adapters read at call time |
-| `CctpAdapter` | `initiateCCTP`/`initiateCCTPFor` (burn-with-hook) and `settle(message, attestation)` (wraps `receiveMessage`) |
+| `CctpAdapter` | `initiateCCTP`/`initiateCCTPFor` (burn-with-hook), direct `settle(message, attestation)`, routed `onCctpExecute(...)` from `CctpExecutor` |
+| `CctpExecutor` | Generic permissionless CCTP mint-relay: consumes executor-routed CCTP messages, pays `mintFee` to the caller, forwards USDC to a recipient or calls `onCctpExecute` on a receiver |
 | `OftAdapter` | One per OFT (selected by `oftId`): `initiateOFT` (`send` with `composeMsg`) and `lzCompose` (LayerZero compose callback) |
 | `OftAdapterFactory` | `deploy(oftId)` — CREATE2-stamps an `OftAdapter` for an OFT at a deterministic, cross-chain-stable address (shared `config`/`owner`/`maxFeeRate` baked in) |
 | `OftId` | Stable numeric ids per OFT (USD₮0=0, USDe=1, sUSDe=2, ENA=3, USDtb=4) — append-only |
 | `OrderLib` | The `Order` struct and its canonical hash / encode / decode |
 | `PricingLib` | The time-decay fee curve (pure) |
 | `BurnMessageV2Lib` | Parse the fields fast-fill needs from a CCTP v2 message |
+| `ExecHookLib` | Encode/decode the `CctpExecutor` envelope: `mintFee`, `target`, `gasLimit`, `refundTo`, `payload` |
 | `OFTComposeMsgCodec` | Decode a LayerZero OFT composed message |
 | `AddressCast` | Checked `bytes32 ↔ address` |
 
@@ -201,11 +216,26 @@ means the window the user agreed to holds no matter when a sponsoring relayer ac
 ## 6. CCTP v2 integration
 
 **Source.** `initiateCCTP` pulls USDC, builds the `Order`, and calls
-`TokenMessengerV2.depositForBurnWithHook` with `mintRecipient == destinationCaller == the
-destination adapter`, and the order in `hookData`. `outputAmount = inputAmount - maxFee` is the
-deterministic worst case the filler is owed (`feeExecuted <= maxFee`).
+`TokenMessengerV2.depositForBurnWithHook`. The user supplies two distinct CCTP costs:
 
-**Destination.** Settlement is atomic and authenticated:
+- `maxFee`: Circle's fast-transfer fee cap. CCTP may execute with `feeExecuted <= maxFee`.
+- `mintFee`: optional USDC paid to whoever relays the destination mint through `CctpExecutor`.
+
+The fast-fill `Order` intentionally does **not** grow a `mintFee` field. Instead,
+`outputAmount = inputAmount - maxFee - mintFee`, and `mintFee` lives only in the CCTP executor
+envelope when used. This keeps `Order`, `orderId`, and the OFT path unchanged.
+
+There are two CCTP source branches:
+
+| `mintFee` | CCTP `mintRecipient` | CCTP `destinationCaller` | `hookData` | Destination entrypoint |
+|---:|---|---|---|---|
+| `0` | `CctpAdapter` | `CctpAdapter` | `OrderLib.encode(order)` | `CctpAdapter.settle` |
+| `> 0` | `CctpExecutor` | `CctpExecutor` | `ExecHookLib.encode(ExecHook{...})` | `CctpExecutor.execute` → `CctpAdapter.onCctpExecute` |
+
+The direct branch is the original proven path. The routed branch adds a relayer incentive for the
+otherwise-unpaid CCTP destination mint.
+
+**Destination, direct (`mintFee == 0`).** Settlement is atomic and authenticated:
 
 ```mermaid
 flowchart TB
@@ -241,17 +271,131 @@ the destination checks `order.outputToken` against its own `config.chainConfig(b
 deliberately does **not** use Circle's auto-relay/forwarding: it sets `destinationCaller =
 address(this)` so only this adapter can call `receiveMessage`, which keeps the mint and the
 optimistic-fill reconciliation in one atomic transaction (and stops a griefer from consuming the
-message nonce without running `_settle`). Settlement is therefore **permissionless but
-adapter-mediated** — anyone may relay the `settle` call, there is no auto-forwarder. Both knobs are
-the user's: their own tx in the self-submitted path, and bound into the signature (`bridgeParams`, §9)
-in the sponsored path.
+message nonce without running `_settle`). Direct settlement is therefore **permissionless but
+adapter-mediated** — anyone may relay the `settle` call, but there is no built-in economic incentive.
+Both bridge-speed knobs are the user's: their own tx in the self-submitted path, and bound into the
+signature (`bridgeParams`) in the sponsored path.
+
+**Destination, routed (`mintFee > 0`).** A third party calls `CctpExecutor.execute(message,
+attestation)` instead of `CctpAdapter.settle`:
+
+```mermaid
+flowchart TB
+    E["relayer calls CctpExecutor.execute"] --> RM["MessageTransmitterV2.receiveMessage"]
+    RM -->|"caller != destinationCaller / bad attestation / used nonce"| REV["revert (nonce unconsumed)"]
+    RM -->|"valid"| MINT["mint amount - feeExecuted USDC to CctpExecutor"]
+    MINT --> P["parse authenticated CCTP fields"]
+    P --> H["decode ExecHook from hookData"]
+    H --> FEE["push mintFee to msg.sender"]
+    FEE -->|"transfer fails"| RETRY["revert; another relayer can retry"]
+    FEE --> NET["forward = amount - feeExecuted - mintFee"]
+    NET --> CALL["transfer forward to target + optional onCctpExecute(sourceDomain, sender, usdc, forward, payload)"]
+    CALL --> AD["CctpAdapter authenticates sourceDomain + sender, then _settle"]
+```
+
+Accounting for fast-fill is unchanged:
+
+```
+forward - outputAmount
+= (inputAmount - feeExecuted - mintFee) - (inputAmount - maxFee - mintFee)
+= maxFee - feeExecuted >= 0
+```
+
+So the filler is still reimbursed exactly `outputAmount`, and the recipient's surplus is still
+`maxFee - feeExecuted`. `mintFee` cancels because it is reserved on the source side and removed before
+adapter settlement.
+
+The routed path preserves the anti-grief property of the direct path: the CCTP message can only be
+consumed by `CctpExecutor` (`destinationCaller = executor`), and the adapter still rejects a payload
+unless the authenticated CCTP `messageSender == address(this)`.
 
 CCTP interfaces are hand-written `^0.8` mirrors (`ITokenMessengerV2`, `IMessageTransmitterV2`)
 because Circle's reference contracts are pinned to solc `0.7.6` and can't be imported here.
 
 ---
 
-## 7. LayerZero OFT integration
+## 7. `CctpExecutor` as a standalone primitive
+
+`CctpExecutor` is deliberately generic. It knows about CCTP messages, USDC, and its own envelope; it
+knows nothing about fast-fill orders. Any CCTP integrator can use it as a permissionless mint relay:
+
+1. On the source chain, call `depositForBurnWithHook` with:
+   - `mintRecipient = address(CctpExecutor)` encoded as bytes32.
+   - `destinationCaller = address(CctpExecutor)` encoded as bytes32.
+   - `hookData = ExecHookLib.encode(envelope)`.
+2. On the destination chain, anyone calls `CctpExecutor.execute(message, attestation)`.
+3. The executor mints USDC to itself via CCTP, pays `envelope.mintFee` to `msg.sender`, and routes the
+   rest according to the envelope.
+
+The envelope is:
+
+```solidity
+struct ExecHook {
+    uint256 mintFee;  // USDC paid to whoever calls execute()
+    bytes32 target;   // forward recipient OR hook receiver contract
+    uint64 gasLimit;  // 0 => forward-only, >0 => call target.onCctpExecute(...)
+    bytes32 refundTo; // claimant if hook execution fails without RedirectFunds
+    bytes payload;    // integrator-defined data
+}
+```
+
+### Forward-only mode
+
+Set `gasLimit = 0`. The executor transfers `amount - feeExecuted - mintFee` USDC to `target` and makes
+no callback. This is the public-good replacement for "please redeem this CCTP message and send the
+USDC to this address", with an optional relayer fee.
+
+### Hook mode
+
+Set `gasLimit > 0` and make `target` implement:
+
+```solidity
+function onCctpExecute(
+    uint32 sourceDomain,
+    bytes32 sender,
+    address usdc,
+    uint256 amount,
+    bytes calldata payload
+) external;
+```
+
+The executor transfers USDC to `target`, then calls that function in the **same atomic frame**. A
+receiver must authenticate `msg.sender == CctpExecutor`; the only trustworthy provenance arguments are
+`sourceDomain` and `sender`, because those are parsed from Circle's attested CCTP message. The
+`payload` is arbitrary integrator data and is not trusted unless the receiver authenticates the CCTP
+source.
+
+Hook failures are handled by the shared `CallbackExecutor` machinery:
+
+- `onCctpExecute` succeeds: target keeps the funds and execution ran.
+- It reverts `RedirectFunds(dest)`: funds are delivered to `dest`.
+- It reverts otherwise or runs out of gas: funds are credited to `claimable[refundTo][usdc]`.
+
+The executor rejects `refundTo == address(CctpExecutor)` so funds cannot be credited to an
+unclaimable self-ledger. If the relayer's `mintFee` push fails (for example the relayer is USDC
+blacklisted), the whole `execute` reverts and the CCTP nonce remains redeemable by someone else.
+
+### How fast-fill uses it
+
+For a routed fast-fill order, the adapter builds:
+
+```solidity
+ExecHook({
+    mintFee: mintFee,
+    target: address(CctpAdapter).toBytes32(),
+    gasLimit: order.callbackGasLimit + SETTLE_GAS_OVERHEAD,
+    refundTo: order.recipient,
+    payload: OrderLib.encode(order)
+})
+```
+
+The adapter always sets `gasLimit > 0`, because the hook is what calls `onCctpExecute` and settles the
+order. A forward-only executor envelope is useful for standalone integrations, but would skip
+fast-fill settlement if used for an adapter order.
+
+---
+
+## 8. LayerZero OFT integration
 
 **Many OFTs, one code path.** `OftAdapter` is generic: it is constructed for a single `oftId` and
 resolves its OFT entrypoint + ERC20 from `config.oftConfig(block.chainid, oftId)`. Onboarding a new
@@ -291,13 +435,14 @@ speed is the pathway's DVN/confirmation configuration, set per-OApp by the OFT o
 What the user controls is `extraOptions`: the executor/DVN options, which must include a compose-gas
 allowance so the LayerZero **executor auto-delivers** `lzReceive` (the mint) and `lzCompose` (the
 settle), paid by the `msg.value` native fee at the source. So OFT settlement *is* auto-delivered by the
-executor (and anyone may also drive a queued compose), whereas CCTP settlement is relayed to our
-`settle`. The user's `extraOptions` is **signed** in the sponsored path (`bridgeParams`, §9), so a
+executor (and anyone may also drive a queued compose), whereas CCTP settlement is either relayed directly
+to `CctpAdapter.settle` or, when `mintFee > 0`, through `CctpExecutor.execute`. The user's
+`extraOptions` is **signed** in the sponsored path (`bridgeParams`), so a
 relayer cannot downgrade the executor configuration the user opted into.
 
 ---
 
-## 8. Settlement & the pull-payment fallback
+## 9. Settlement & the pull-payment fallback
 
 `_settle` disburses the arrived funds and is the only place that moves the reimbursement pool:
 
@@ -317,7 +462,7 @@ never pausable). Effects (status) are written before any external transfer; `fil
 
 ---
 
-## 9. Destination executions
+## 10. Destination executions
 
 Initiate calls keep `recipient` as `bytes32` for bridge compatibility, but creation rejects any value that
 is not the canonical bytes32 form of an EVM address (upper 12 bytes zero), and rejects the zero address.
@@ -361,7 +506,7 @@ transfer (no second callback), and the filler reimbursement is never hooked.
 
 ---
 
-## 10. Configuration & admin
+## 11. Configuration & admin
 
 **All chain config is immutable and lives in [`FastFillConfig`](../src/config/FastFillConfig.sol)** —
 a contract CREATE2-deployed to one address on every chain. It exposes two lookups: `chainConfig(chainId)`
@@ -394,13 +539,14 @@ approve+act; `initiate*For` / `fillFor` pull from a signer who is not `msg.sende
 `permitWitnessTransferFrom`, with the witness bound to the order intent (or orderId) so a submitting
 relayer cannot alter what was signed. The order-intent witness binds the recipient, the amounts, the
 relative `deliveryWindow`, the `discountRate`, the `baseFee`, **and** a `bridgeParams` hash of the
-transport mode the user opted into (CCTP: `keccak256(maxFee, minFinalityThreshold)`; OFT:
+transport mode the user opted into (CCTP:
+`keccak256(abi.encode(maxFee, minFinalityThreshold, mintFee))`; OFT:
 `keccak256(extraOptions)`) — so a relayer can neither re-price, re-time, nor change the bridging
 speed / executor of a signed intent.
 
 ---
 
-## 11. Security model
+## 12. Security model
 
 | Vector | Defense |
 |---|---|
@@ -408,6 +554,9 @@ speed / executor of a signed intent.
 | Replay of a bridge message | CCTP `receiveMessage` consumes the nonce; LZ enforces nonce ordering; plus the `status != Settled` app guard. |
 | Fake-order fill | Non-matching `orderId` ⇒ never reimbursed (self-punishing). |
 | Forged CCTP burn to our adapter | `messageSender == address(this)` rejects burns not initiated by our (same-address) adapter. |
+| Routed CCTP nonce griefing | `mintFee > 0` messages set `destinationCaller = CctpExecutor`; only the executor can consume them, and it forwards authenticated CCTP fields to the adapter before settlement. |
+| Failed CCTP executor relayer payout | The `mintFee` push reverts the entire `execute`, rolling back the CCTP nonce so another relayer can retry. |
+| Failed CCTP executor hook | Atomic transfer+call rolls back and routes funds to `RedirectFunds(dest)` or `claimable[refundTo]`; `refundTo == executor` is rejected. |
 | Forged OFT compose | Three gates: endpoint, local OFT, `composeFrom == address(this)`. |
 | Misconfigured registry | Local domain/eid/token are read live from the bridge contracts and cross-checked against `FastFillConfig`; a mismatch reverts. |
 | Sponsor altering a signed intent | Permit2 witness binds the order intent / orderId **and the opted-into bridge mode** (`bridgeParams`); a tampered order — or a flipped fast/slow / executor option — recovers a different signer and reverts (both proven against real Permit2). |
@@ -419,4 +568,6 @@ speed / executor of a signed intent.
 | Cross-adapter confusion | `order.bridgeType` + token/peer/chain checks + physically separate deployments. |
 
 > **Status:** prototype, not audited. The pricing curve and surplus routing (currently → recipient)
-> are intended iteration points. Filling is permissionless by design.
+> are intended iteration points. Filling is permissionless by design. The CCTP direct path is proven
+> live; the `CctpExecutor` routed path is deployed on Base, Optimism, and Arbitrum and smoke-tested
+> live for both unfilled and optimistically filled orders.

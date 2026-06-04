@@ -4,9 +4,9 @@ pragma solidity ^0.8.26;
 import {Ownable} from "solady/auth/Ownable.sol";
 import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 import {Multicallable} from "solady/utils/Multicallable.sol";
-import {LibCall} from "solady/utils/LibCall.sol";
 
-import {IFastFill, FillStatus, OrderRecord, CallbackResult} from "./interfaces/IFastFill.sol";
+import {CallbackExecutor} from "./CallbackExecutor.sol";
+import {IFastFill, FillStatus, OrderRecord} from "./interfaces/IFastFill.sol";
 import {IFastFillReceiver} from "./interfaces/IFastFillReceiver.sol";
 import {IERC20Permit} from "./interfaces/IERC20Permit.sol";
 import {ISignatureTransfer} from "./interfaces/permit2/ISignatureTransfer.sol";
@@ -14,7 +14,6 @@ import {Order, OrderLib} from "./libraries/OrderLib.sol";
 import {PricingLib} from "./libraries/PricingLib.sol";
 import {PermitLib} from "./libraries/PermitLib.sol";
 import {AddressCast} from "./libraries/AddressCast.sol";
-import {TransientReentrancyGuard} from "./utils/TransientReentrancyGuard.sol";
 
 /// @title  FastFillBase
 /// @notice Shared lifecycle for an optimistic cross-chain fill protocol that wraps message-based
@@ -28,7 +27,10 @@ import {TransientReentrancyGuard} from "./utils/TransientReentrancyGuard.sol";
 ///         never reimbursed. Fills are therefore trustless: a bad filler can only lose its own
 ///         funds. The destination contract's token balance is the reimbursement pool — there is no
 ///         separate escrow, and every order settles exactly once.
-abstract contract FastFillBase is IFastFill, Ownable, TransientReentrancyGuard, Multicallable {
+///
+///         The deliver-with-callback machinery and the pull-payment claim ledger live in
+///         `CallbackExecutor`, shared with the standalone `CctpExecutor`.
+abstract contract FastFillBase is IFastFill, CallbackExecutor, Ownable, Multicallable {
     using OrderLib for Order;
     using AddressCast for bytes32;
     using AddressCast for address;
@@ -36,12 +38,6 @@ abstract contract FastFillBase is IFastFill, Ownable, TransientReentrancyGuard, 
     /// @notice Uniswap Permit2 — same address on every chain — used for signature-based pulls where
     ///         the funds come from a signer that is not `msg.sender` (sponsored / intent flows).
     address public constant PERMIT2 = 0x000000000022D473030F116dDEE9F6B43aC78BA3;
-
-    /// @notice Maximum gas that an order may request for destination execution.
-    uint64 public constant MAX_CALLBACK_GAS_LIMIT = 5_000_000;
-
-    /// @dev `RedirectFunds(address)` revert data: selector (4 bytes) + encoded address (32 bytes).
-    uint16 private constant CALLBACK_RETURNDATA_LIMIT = 0x24;
 
     // ---------------------------------------------------------------------------------------------
     // Errors
@@ -51,7 +47,6 @@ abstract contract FastFillBase is IFastFill, Ownable, TransientReentrancyGuard, 
     error WrongDestinationChain(uint32 expected);
     error OrderAlreadyActive(bytes32 orderId);
     error AlreadySettled(bytes32 orderId);
-    error NothingToClaim();
     error InvalidMaxFeeRate(uint256 maxFeeRate);
     error InvalidWindow(uint64 startTime, uint64 expectedDeliveryTime);
     error InvalidOutputAmount(uint256 outputAmount, uint256 inputAmount);
@@ -60,8 +55,6 @@ abstract contract FastFillBase is IFastFill, Ownable, TransientReentrancyGuard, 
     error NotSourceChain(uint32 srcChainId);
     error ZeroRecipient();
     error InvalidCallbackGasLimit(uint64 callbackGasLimit, uint64 maxCallbackGasLimit);
-    error InsufficientCallbackGas(uint256 available, uint256 callbackGasLimit);
-    error OnlySelf();
 
     // ---------------------------------------------------------------------------------------------
     // Storage
@@ -69,9 +62,6 @@ abstract contract FastFillBase is IFastFill, Ownable, TransientReentrancyGuard, 
 
     /// @notice Destination-chain record for each order, keyed by orderId.
     mapping(bytes32 orderId => OrderRecord) internal _orders;
-
-    /// @notice Funds that failed to push (e.g. reverting/blacklisted recipient), claimable later.
-    mapping(address account => mapping(address token => uint256)) internal _claimable;
 
     /// @notice Per-adapter governance cap on the fee rate, WAD (<= 1e18).
     uint256 public maxFeeRate;
@@ -126,7 +116,7 @@ abstract contract FastFillBase is IFastFill, Ownable, TransientReentrancyGuard, 
         uint256 fee;
         (orderId, token, recipient, payout, fee) = _prepareFill(order, msg.sender);
         SafeTransferLib.safeTransferFrom(token, msg.sender, address(this), payout);
-        _deliverWithHook(orderId, token, recipient, payout, order.hookData, order.callbackGasLimit);
+        _deliverOrderWithHook(orderId, token, recipient, payout, order.hookData, order.callbackGasLimit);
         emit OrderFilled(orderId, msg.sender, payout, fee, uint40(block.timestamp));
     }
 
@@ -150,7 +140,7 @@ abstract contract FastFillBase is IFastFill, Ownable, TransientReentrancyGuard, 
         // The filler signed `permitted.amount == order.outputAmount` (worst-case) for this orderId;
         // pull only the actual payout.
         _pullFillViaPermit2(orderId, token, filler, order.outputAmount, payout, permit);
-        _deliverWithHook(orderId, token, recipient, payout, order.hookData, order.callbackGasLimit);
+        _deliverOrderWithHook(orderId, token, recipient, payout, order.hookData, order.callbackGasLimit);
         emit OrderFilled(orderId, filler, payout, fee, uint40(block.timestamp));
     }
 
@@ -213,41 +203,22 @@ abstract contract FastFillBase is IFastFill, Ownable, TransientReentrancyGuard, 
             if (surplus != 0) _payout(orderId, token, recipient, surplus);
         } else {
             // Never filled: the recipient receives everything that arrived, running any destination hook.
-            _deliverWithHook(orderId, token, recipient, arrived, order.hookData, order.callbackGasLimit);
+            _deliverOrderWithHook(orderId, token, recipient, arrived, order.hookData, order.callbackGasLimit);
         }
 
         emit OrderSettled(orderId, filler, arrived, surplus);
     }
 
     // ---------------------------------------------------------------------------------------------
-    // Payout & claim (pull-payment fallback)
-    // ---------------------------------------------------------------------------------------------
-
-    /// @dev Try to push `amount` of `token` to `to`; on failure credit the claim ledger instead.
-    function _payout(bytes32 orderId, address token, address to, uint256 amount) internal {
-        if (amount == 0) return;
-        if (_tryTransfer(token, to, amount)) return;
-        _claimable[to][token] += amount;
-        emit PayoutDeferred(orderId, to, token, amount);
-    }
-
-    /// @dev A return-value-checked ERC20 transfer that never reverts (returns success instead).
-    function _tryTransfer(address token, address to, uint256 amount) private returns (bool) {
-        (bool ok, bytes memory ret) = token.call(abi.encodeWithSelector(0xa9059cbb, to, amount)); // transfer(address,uint256)
-        return ok && (ret.length == 0 || abi.decode(ret, (bool)));
-    }
-
-    // ---------------------------------------------------------------------------------------------
     // Destination execution (optional recipient callback on delivery)
     // ---------------------------------------------------------------------------------------------
 
-    /// @dev Deliver `amount` of `token` to `recipient` and, if the order carries hookData and the
-    ///      recipient is a contract, run its `onFastFill` in the SAME atomic frame. A failed callback
-    ///      rolls the transfer back (the adapter keeps the funds) and routes them by the receiver's
-    ///      bounded revert data: `RedirectFunds(dest)` -> dest; anything else -> the claim ledger.
-    ///      Funds are never stuck. The whole base stays `nonReentrant`, so the receiver cannot
-    ///      re-enter fill/settle/claim, and the call is gas-capped + return-bomb-safe.
-    function _deliverWithHook(
+    /// @dev Deliver `amount` of `token` to `recipient`, running the recipient's `onFastFill` hook in
+    ///      the same atomic frame when the order carries hookData and the recipient is a contract.
+    ///      Wraps the shared `CallbackExecutor._deliverWithHook`: the fast-fill callback is
+    ///      `onFastFill(orderId, token, amount, hookData)` and the fallback claimant on a reverting
+    ///      callback is the recipient itself.
+    function _deliverOrderWithHook(
         bytes32 orderId,
         address token,
         address recipient,
@@ -255,74 +226,10 @@ abstract contract FastFillBase is IFastFill, Ownable, TransientReentrancyGuard, 
         bytes memory hookData,
         uint64 gasLimit
     ) internal {
-        if (amount == 0) return;
-        // No execution requested, or a codeless address (EOA / undeployed) that cannot run a hook:
-        // just deliver. A low-level call to a codeless address would otherwise "succeed" with no effect.
-        if (hookData.length == 0 || recipient.code.length == 0) {
-            _payout(orderId, token, recipient, amount);
-            return;
-        }
-        // Ensure the relayer forwards the user's signed gas budget (EIP-150 63/64 across the self-call
-        // and the hook call, plus the ERC20 transfer); otherwise force a retry instead of letting an
-        // under-funded call silently route to the claim ledger.
-        if (gasleft() < gasLimit + gasLimit / 32 + 50_000) revert InsufficientCallbackGas(gasleft(), gasLimit);
-
-        try this._executeDelivery(token, recipient, amount, orderId, hookData, gasLimit) {
-            emit DestinationCallback(orderId, recipient, CallbackResult.Executed);
-        } catch (bytes memory reason) {
-            address dest = _parseRedirect(reason);
-            if (dest != address(0) && dest != address(this)) {
-                _payout(orderId, token, dest, amount);
-                emit DestinationCallback(orderId, dest, CallbackResult.Redirected);
-            } else {
-                _claimable[recipient][token] += amount;
-                emit PayoutDeferred(orderId, recipient, token, amount);
-                emit DestinationCallback(orderId, recipient, CallbackResult.Claimable);
-            }
-        }
-    }
-
-    /// @dev Self-only delivery+callback frame. Transfers funds then calls `onFastFill` with a fixed
-    ///      gas budget, copying at most 36 bytes of returndata (return-bomb-safe). On callback failure
-    ///      it re-reverts with those bounded bytes so the caller's `try` rolls the transfer back and
-    ///      can parse a redirect. Not `nonReentrant`, so the self-call passes the caller's guard.
-    function _executeDelivery(
-        address token,
-        address recipient,
-        uint256 amount,
-        bytes32 orderId,
-        bytes calldata hookData,
-        uint256 gasLimit
-    ) external {
-        if (msg.sender != address(this)) revert OnlySelf();
-        SafeTransferLib.safeTransfer(token, recipient, amount);
-        bytes memory cd = abi.encodeCall(IFastFillReceiver.onFastFill, (orderId, token, amount, hookData));
-        (bool ok,, bytes memory ret) = LibCall.tryCall(recipient, 0, gasLimit, CALLBACK_RETURNDATA_LIMIT, cd);
-        if (!ok) LibCall.bubbleUpRevert(ret);
-    }
-
-    /// @dev Decode a `RedirectFunds(address)` revert (selector + 32-byte address = 36 bytes); else 0.
-    function _parseRedirect(bytes memory reason) private pure returns (address dest) {
-        if (reason.length == CALLBACK_RETURNDATA_LIMIT) {
-            bytes32 selWord;
-            bytes32 addrWord;
-            assembly {
-                selWord := mload(add(reason, 0x20))
-                addrWord := mload(add(reason, 0x24))
-            }
-            if (bytes4(selWord) == IFastFillReceiver.RedirectFunds.selector) {
-                dest = address(uint160(uint256(addrWord)));
-            }
-        }
-    }
-
-    /// @inheritdoc IFastFill
-    function claim(address token) external nonReentrant returns (uint256 amount) {
-        amount = _claimable[msg.sender][token];
-        if (amount == 0) revert NothingToClaim();
-        _claimable[msg.sender][token] = 0;
-        SafeTransferLib.safeTransfer(token, msg.sender, amount);
-        emit Claimed(msg.sender, token, amount);
+        bytes memory callbackData = hookData.length == 0
+            ? bytes("")
+            : abi.encodeCall(IFastFillReceiver.onFastFill, (orderId, token, amount, hookData));
+        _deliverWithHook(orderId, token, recipient, amount, callbackData, gasLimit, recipient);
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -480,11 +387,6 @@ abstract contract FastFillBase is IFastFill, Ownable, TransientReentrancyGuard, 
     /// @inheritdoc IFastFill
     function getOrder(bytes32 orderId) external view returns (OrderRecord memory) {
         return _orders[orderId];
-    }
-
-    /// @notice Funds owed to `account` in `token` from a deferred payout.
-    function claimable(address account, address token) external view returns (uint256) {
-        return _claimable[account][token];
     }
 
     // ---------------------------------------------------------------------------------------------

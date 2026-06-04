@@ -41,7 +41,7 @@ contract CctpLifecycleTest is Fixtures {
         usdc.approve(address(srcCctp), INPUT);
         uint64 nonce;
         (orderId, nonce) = srcCctp.initiateCCTP(
-            DST_CHAIN, _b32(recipient), INPUT, MAX_FEE, 1000, WINDOW, RATE, baseFee, Execution(0, "")
+            DST_CHAIN, _b32(recipient), INPUT, MAX_FEE, 0, 1000, WINDOW, RATE, baseFee, Execution(0, "")
         );
         vm.stopPrank();
         order = _cctpOrder(INPUT, MAX_FEE, start, start + WINDOW, RATE, baseFee, nonce);
@@ -87,7 +87,7 @@ contract CctpLifecycleTest is Fixtures {
         vm.startPrank(user);
         usdc.approve(address(srcCctp), INPUT);
         vm.expectRevert(abi.encodeWithSelector(AddressCast.InvalidAddress.selector, malformed));
-        srcCctp.initiateCCTP(DST_CHAIN, malformed, INPUT, MAX_FEE, 1000, WINDOW, RATE, 0, Execution(0, ""));
+        srcCctp.initiateCCTP(DST_CHAIN, malformed, INPUT, MAX_FEE, 0, 1000, WINDOW, RATE, 0, Execution(0, ""));
         vm.stopPrank();
 
         assertEq(tokenMessenger.burnCount(), 0, "no CCTP burn");
@@ -101,7 +101,7 @@ contract CctpLifecycleTest is Fixtures {
         vm.startPrank(user);
         usdc.approve(address(srcCctp), INPUT);
         vm.expectRevert(FastFillBase.ZeroRecipient.selector);
-        srcCctp.initiateCCTP(DST_CHAIN, bytes32(0), INPUT, MAX_FEE, 1000, WINDOW, RATE, 0, Execution(0, ""));
+        srcCctp.initiateCCTP(DST_CHAIN, bytes32(0), INPUT, MAX_FEE, 0, 1000, WINDOW, RATE, 0, Execution(0, ""));
         vm.stopPrank();
 
         assertEq(tokenMessenger.burnCount(), 0, "no CCTP burn");
@@ -118,7 +118,7 @@ contract CctpLifecycleTest is Fixtures {
         usdc.approve(address(srcCctp), INPUT);
         vm.expectRevert(abi.encodeWithSelector(FastFillBase.InvalidCallbackGasLimit.selector, tooHigh, maxGas));
         srcCctp.initiateCCTP(
-            DST_CHAIN, _b32(recipient), INPUT, MAX_FEE, 1000, WINDOW, RATE, 0, Execution(tooHigh, HOOK)
+            DST_CHAIN, _b32(recipient), INPUT, MAX_FEE, 0, 1000, WINDOW, RATE, 0, Execution(tooHigh, HOOK)
         );
         vm.stopPrank();
 
@@ -135,7 +135,7 @@ contract CctpLifecycleTest is Fixtures {
         vm.startPrank(user);
         usdc.approve(address(srcCctp), INPUT);
         (bytes32 orderId, uint64 nonce) = srcCctp.initiateCCTP(
-            DST_CHAIN, _b32(recipient), INPUT, MAX_FEE, 1000, WINDOW, RATE, 0, Execution(maxGas, HOOK)
+            DST_CHAIN, _b32(recipient), INPUT, MAX_FEE, 0, 1000, WINDOW, RATE, 0, Execution(maxGas, HOOK)
         );
         vm.stopPrank();
 
@@ -229,7 +229,7 @@ contract CctpLifecycleTest is Fixtures {
         // baseFee >= outputAmount (INPUT - MAX_FEE) leaves the recipient nothing at fill -> rejected.
         vm.expectRevert(abi.encodeWithSelector(FastFillBase.InvalidBaseFee.selector, INPUT - MAX_FEE, INPUT - MAX_FEE));
         srcCctp.initiateCCTP(
-            DST_CHAIN, _b32(recipient), INPUT, MAX_FEE, 1000, WINDOW, RATE, INPUT - MAX_FEE, Execution(0, "")
+            DST_CHAIN, _b32(recipient), INPUT, MAX_FEE, 0, 1000, WINDOW, RATE, INPUT - MAX_FEE, Execution(0, "")
         );
         vm.stopPrank();
     }

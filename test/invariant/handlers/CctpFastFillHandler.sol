@@ -81,7 +81,7 @@ contract CctpFastFillHandler is Test {
         vm.startPrank(userA);
         usdc.approve(address(src), amount);
         (bytes32 orderId, uint64 nonce) =
-            src.initiateCCTP(DST_CHAIN, _b32(recip), amount, maxFee, 1000, window, rate, baseFee, Execution(0, ""));
+            src.initiateCCTP(DST_CHAIN, _b32(recip), amount, maxFee, 0, 1000, window, rate, baseFee, Execution(0, ""));
         vm.stopPrank();
 
         Order memory o = Order({

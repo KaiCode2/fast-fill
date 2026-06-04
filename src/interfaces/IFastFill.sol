@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
+import {ICallbackExecutor} from "./ICallbackExecutor.sol";
 import {Order} from "../libraries/OrderLib.sol";
 
 /// @notice Lifecycle status of an order, keyed by orderId on the destination chain.
@@ -8,13 +9,6 @@ enum FillStatus {
     None, // 0: never seen (default)
     Filled, // a relayer optimistically paid the recipient
     Settled // the bridge message arrived and funds were disbursed (terminal)
-}
-
-/// @notice Outcome of a destination-execution callback (see IFastFillReceiver).
-enum CallbackResult {
-    Executed, // onFastFill succeeded; funds delivered to the recipient and the hook ran
-    Redirected, // onFastFill reverted with RedirectFunds(dest); funds delivered to dest instead
-    Claimable // onFastFill reverted otherwise; funds credited to the recipient's claim ledger
 }
 
 /// @notice Destination-chain record for an order. Packs into a single storage slot.
@@ -25,7 +19,7 @@ struct OrderRecord {
 }
 
 /// @notice Shared external surface implemented by every fast-fill adapter.
-interface IFastFill {
+interface IFastFill is ICallbackExecutor {
     /// @notice An order was initiated on the source chain.
     event OrderCreated(
         bytes32 indexed orderId,
@@ -47,16 +41,6 @@ interface IFastFill {
         bytes32 indexed orderId, address indexed filler, uint256 arrivedAmount, uint256 surplusToRecipient
     );
 
-    /// @notice A push payout failed and was credited to the pull-payment ledger instead.
-    event PayoutDeferred(bytes32 indexed orderId, address indexed to, address indexed token, uint256 amount);
-
-    /// @notice A previously-deferred payout was claimed.
-    event Claimed(address indexed account, address indexed token, uint256 amount);
-
-    /// @notice A destination-execution hook ran for a delivered order; `result` records the outcome
-    ///         and `fundsTo` the address that ultimately received the funds.
-    event DestinationCallback(bytes32 indexed orderId, address indexed fundsTo, CallbackResult result);
-
     /// @notice Optimistically fill an in-flight order; pays the recipient now, records the filler.
     function fill(Order calldata order) external returns (bytes32 orderId);
 
@@ -68,7 +52,4 @@ interface IFastFill {
 
     /// @notice Read the destination-chain record for an order.
     function getOrder(bytes32 orderId) external view returns (OrderRecord memory);
-
-    /// @notice Withdraw funds credited to the caller after a failed push payout.
-    function claim(address token) external returns (uint256 amount);
 }
