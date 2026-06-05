@@ -84,4 +84,69 @@ library Addresses {
     uint32 internal constant EID_OPTIMISM = 30_111;
     uint32 internal constant EID_ARBITRUM = 30_110;
     uint32 internal constant EID_BASE = 30_184;
+
+    // --- Demo-hook dependencies (per chain). Verify against the official sources before any prod deploy. ---
+
+    // Uniswap V3 SwapRouter02. Source: docs.uniswap.org/contracts/v3/reference/deployments.
+    // ETH/OP/ARB share one address; Base differs.
+    address internal constant UNISWAP_SWAP_ROUTER_02_ETHEREUM = 0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45;
+    address internal constant UNISWAP_SWAP_ROUTER_02_OPTIMISM = 0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45;
+    address internal constant UNISWAP_SWAP_ROUTER_02_ARBITRUM = 0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45;
+    address internal constant UNISWAP_SWAP_ROUTER_02_BASE = 0x2626664c2603336E57B271c5C0b26F421741e481;
+
+    // Aave V3 Pool. Source: aave.com/docs + the Aave address-book.
+    address internal constant AAVE_V3_POOL_ETHEREUM = 0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2;
+    address internal constant AAVE_V3_POOL_OPTIMISM = 0x794a61358D6845594F94dc1DB02A252b5b4814aD;
+    address internal constant AAVE_V3_POOL_ARBITRUM = 0x794a61358D6845594F94dc1DB02A252b5b4814aD;
+    address internal constant AAVE_V3_POOL_BASE = 0xA238Dd80C259a72e81d7e4664a9801593F98d1c5;
+
+    // Rhinestone IntentExecutor (ERC-7579 executor module). TODO: fill in once deployed per chain;
+    // `address(0)` means "not deployed here" and DeployHooks skips the IntentExecutorHook on that chain.
+    address internal constant INTENT_EXECUTOR_ETHEREUM = address(0);
+    address internal constant INTENT_EXECUTOR_OPTIMISM = address(0);
+    address internal constant INTENT_EXECUTOR_ARBITRUM = address(0);
+    address internal constant INTENT_EXECUTOR_BASE = address(0);
+
+    // Deployed demo-hook singletons (CREATE2; see DEPLOYMENTS.md / docs/HOOKS.md). OP and ARB share an
+    // address per hook (same router/pool); Base differs. Not deployed on Ethereum.
+    address internal constant UNISWAP_SWAP_HOOK_OPTIMISM = 0x913FC613BE7a603Dc222Bce1997Ae28Fd7c48665;
+    address internal constant UNISWAP_SWAP_HOOK_ARBITRUM = 0x913FC613BE7a603Dc222Bce1997Ae28Fd7c48665;
+    address internal constant UNISWAP_SWAP_HOOK_BASE = 0xDeAF6072b2774a49688Fd09817Be9FBFbdE2835e;
+    address internal constant AAVE_DEPOSIT_HOOK_OPTIMISM = 0xA0eCA1b76ff575B4031c510862f1024deFEEE321;
+    address internal constant AAVE_DEPOSIT_HOOK_ARBITRUM = 0xA0eCA1b76ff575B4031c510862f1024deFEEE321;
+    address internal constant AAVE_DEPOSIT_HOOK_BASE = 0xBE30475CaEEd5003541DbAA8973bb01bA8433DC3;
+
+    // --- Per-chain resolvers (return address(0) for an unsupported chain) ---
+
+    function usdc(uint256 chainId) internal pure returns (address) {
+        if (chainId == CHAIN_ETHEREUM) return USDC_ETHEREUM;
+        if (chainId == CHAIN_OPTIMISM) return USDC_OPTIMISM;
+        if (chainId == CHAIN_ARBITRUM) return USDC_ARBITRUM;
+        if (chainId == CHAIN_BASE) return USDC_BASE;
+        return address(0);
+    }
+
+    function uniswapSwapRouter(uint256 chainId) internal pure returns (address) {
+        if (chainId == CHAIN_ETHEREUM) return UNISWAP_SWAP_ROUTER_02_ETHEREUM;
+        if (chainId == CHAIN_OPTIMISM) return UNISWAP_SWAP_ROUTER_02_OPTIMISM;
+        if (chainId == CHAIN_ARBITRUM) return UNISWAP_SWAP_ROUTER_02_ARBITRUM;
+        if (chainId == CHAIN_BASE) return UNISWAP_SWAP_ROUTER_02_BASE;
+        return address(0);
+    }
+
+    function aaveV3Pool(uint256 chainId) internal pure returns (address) {
+        if (chainId == CHAIN_ETHEREUM) return AAVE_V3_POOL_ETHEREUM;
+        if (chainId == CHAIN_OPTIMISM) return AAVE_V3_POOL_OPTIMISM;
+        if (chainId == CHAIN_ARBITRUM) return AAVE_V3_POOL_ARBITRUM;
+        if (chainId == CHAIN_BASE) return AAVE_V3_POOL_BASE;
+        return address(0);
+    }
+
+    function intentExecutor(uint256 chainId) internal pure returns (address) {
+        if (chainId == CHAIN_ETHEREUM) return INTENT_EXECUTOR_ETHEREUM;
+        if (chainId == CHAIN_OPTIMISM) return INTENT_EXECUTOR_OPTIMISM;
+        if (chainId == CHAIN_ARBITRUM) return INTENT_EXECUTOR_ARBITRUM;
+        if (chainId == CHAIN_BASE) return INTENT_EXECUTOR_BASE;
+        return address(0);
+    }
 }

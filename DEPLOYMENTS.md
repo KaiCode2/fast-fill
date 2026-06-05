@@ -38,6 +38,55 @@ Notes:
 - USDtb (`oftId = 4`) is present in the registry but was not deployed by the current factory script.
 - The counterpart adapter for each bridge/token is the same address on every deployed chain.
 
+## Demo Hooks (destination-execution callbacks)
+
+Demonstration hooks that receive the `onFastFill` callback (`src/interfaces/IFastFillReceiver.sol`): the
+adapter delivers the bridged token to the hook and, in the same atomic frame, the hook acts on it. Every
+hook leans on the protocol's revert-to-redirect rule — if the action reverts, the original funds are sent
+to the user (`RedirectFunds(user)`), so a failed action degrades to a plain transfer, never a stuck balance.
+Full design + usage in [`docs/HOOKS.md`](docs/HOOKS.md).
+
+Deployed to **Base, Optimism, and Arbitrum** from deployer `0xA06Bf163BC51A457D99C6283e78897727c4fDdF2`,
+CREATE2-deterministic. Each hook embeds its protocol dependency (router/pool) as an immutable, so the
+address is shared across chains that share the dependency (Optimism + Arbitrum) and differs on Base.
+
+| Hook | Base | Optimism · Arbitrum |
+|---|---|---|
+| `UniswapSwapHook` | `0xDeAF6072b2774a49688Fd09817Be9FBFbdE2835e` | `0x913FC613BE7a603Dc222Bce1997Ae28Fd7c48665` |
+| `AaveDepositHook` | `0xBE30475CaEEd5003541DbAA8973bb01bA8433DC3` | `0xA0eCA1b76ff575B4031c510862f1024deFEEE321` |
+
+Dependencies (`script/config/Addresses.sol`): Uniswap V3 `SwapRouter02` — Base `0x2626…1e481`, OP/ARB
+`0x68b3…65Fc45`; Aave V3 `Pool` — Base `0xA238…D1c5`, OP/ARB `0x794a…814aD`. Post-deploy checks confirmed
+`UniswapSwapHook.router()` and `AaveDepositHook.pool()` resolve to these on every chain.
+
+`IntentExecutorHook` is **not deployed** — it is implemented, selector-verified, and unit-tested, but
+deferred pending (a) a deployed `IntentExecutor` address per chain and (b) end-to-end validation against the
+real module. Rationale + completion checklist in [`docs/HOOKS.md`](docs/HOOKS.md).
+
+### Demo Hook deploy transactions
+
+| Hook | Chain | Tx |
+|---|---|---|
+| `UniswapSwapHook` | Base | `0x035a43d4034c77a9df8a098296895b277409fb2b9ad864501294eab02ee642a8` |
+| `AaveDepositHook` | Base | `0x3a3c019fd8a081cc5d778b45eb2fb8a73fbaf94645bdc2625d8ed6b5012fbb29` |
+| `UniswapSwapHook` | Optimism | `0x6c6135a74aef31c1fa7c20865b47ce551a01b7650480d50fe60e48c6633d626a` |
+| `AaveDepositHook` | Optimism | `0x469094875f559115a3422b0c5ac0ae287671ca07e16b3d6c9dfd83f33972be6f` |
+| `UniswapSwapHook` | Arbitrum | `0x81f7fd98aaaaa4a40bfaae2a56779cb9ef5bd9b54164a8e263e502bb138c408f` |
+| `AaveDepositHook` | Arbitrum | `0x307cc418c5e5409f0a0c84713f00860799f1d18f46b58f7415167cfcc4a9aadd` |
+
+Deploy command: `forge script script/DeployHooks.s.sol --rpc-url $RPC --broadcast --private-key $KEY --slow`.
+The script reads router/pool/executor from `Addresses.sol` by chain id and skips any hook whose dependency is
+unset (why `IntentExecutorHook` is skipped everywhere today).
+
+All six are **source-verified** on the explorers (Etherscan V2 unified API):
+
+| Hook | Base (Basescan) | Optimism (Optimistic Etherscan) | Arbitrum (Arbiscan) |
+|---|---|---|---|
+| `UniswapSwapHook` | [`0xDeAF…2835e`](https://basescan.org/address/0xDeAF6072b2774a49688Fd09817Be9FBFbdE2835e#code) | [`0x913F…48665`](https://optimistic.etherscan.io/address/0x913FC613BE7a603Dc222Bce1997Ae28Fd7c48665#code) | [`0x913F…48665`](https://arbiscan.io/address/0x913FC613BE7a603Dc222Bce1997Ae28Fd7c48665#code) |
+| `AaveDepositHook` | [`0xBE30…33DC3`](https://basescan.org/address/0xBE30475CaEEd5003541DbAA8973bb01bA8433DC3#code) | [`0xA0eC…EE321`](https://optimistic.etherscan.io/address/0xA0eCA1b76ff575B4031c510862f1024deFEEE321#code) | [`0xA0eC…EE321`](https://arbiscan.io/address/0xA0eCA1b76ff575B4031c510862f1024deFEEE321#code) |
+
+Re-verify (if ever needed) with `forge verify-contract <addr> src/hooks/<Hook>.sol:<Hook> --chain-id <id> --constructor-args $(cast abi-encode 'constructor(address)' <dep>) --etherscan-api-key $ETHERSCAN_API_KEY --watch`.
+
 ## Deploy Transactions
 
 ### FastFillConfig
