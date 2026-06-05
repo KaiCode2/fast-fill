@@ -41,8 +41,22 @@ interface IFastFill is ICallbackExecutor {
         bytes32 indexed orderId, address indexed filler, uint256 arrivedAmount, uint256 surplusToRecipient
     );
 
+    /// @notice A `fillBatch` order was skipped because it reverted (already filled, wrong chain, ...).
+    ///         No funds moved for it and it stays fillable; the rest of the batch still filled.
+    event FillSkipped(uint256 indexed index, bytes32 indexed orderId);
+
     /// @notice Optimistically fill an in-flight order; pays the recipient now, records the filler.
     function fill(Order calldata order) external returns (bytes32 orderId);
+
+    /// @notice Like `fill`, but funded by `msg.sender` while `beneficiary` is recorded as the filler and
+    ///         reimbursed at settlement (`address(0)` => `msg.sender`). The user-signed recipient who
+    ///         receives the payout is unaffected.
+    function fillTo(Order calldata order, address beneficiary) external returns (bytes32 orderId);
+
+    /// @notice Fill many in-flight orders in one transaction (partial success), funded by `msg.sender`
+    ///         and reimbursed to `beneficiary` (`address(0)` => `msg.sender`). A reverting order is
+    ///         skipped, not aborting the batch; `filled[i]` reports per-order success.
+    function fillBatch(Order[] calldata orders, address beneficiary) external returns (bool[] memory filled);
 
     /// @notice Preview the fill outcome at a given time (e.g. block.timestamp).
     function quoteFill(Order calldata order, uint256 fillTime)

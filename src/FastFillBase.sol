@@ -110,14 +110,69 @@ abstract contract FastFillBase is IFastFill, CallbackExecutor, Ownable, Multical
     /// @dev `msg.sender` is the filler and the payer; it must have approved this adapter for the
     ///      payout (or batch a `selfPermit` via `multicall` for a single transaction).
     function fill(Order calldata order) external nonReentrant whenNotPaused returns (bytes32 orderId) {
+        return _fill(order, msg.sender, msg.sender);
+    }
+
+    /// @inheritdoc IFastFill
+    /// @dev `msg.sender` funds the payout, but `beneficiary` is recorded as the filler and is the one
+    ///      reimbursed at settlement (`address(0)` => `msg.sender`) — e.g. a hot wallet relays while a
+    ///      treasury collects the reimbursement. Only the relayer's OWN reimbursement is redirected; the
+    ///      user-signed `order.recipient` (who receives the payout now) is unaffected.
+    function fillTo(Order calldata order, address beneficiary)
+        external
+        nonReentrant
+        whenNotPaused
+        returns (bytes32 orderId)
+    {
+        return _fill(order, beneficiary == address(0) ? msg.sender : beneficiary, msg.sender);
+    }
+
+    /// @inheritdoc IFastFill
+    /// @dev Fill many in-flight orders in one transaction, all funded by `msg.sender` and recording
+    ///      `beneficiary` as the filler (`address(0)` => `msg.sender`). Each order is attempted
+    ///      independently: one that reverts (already filled, wrong chain/bridge, insufficient approval,
+    ///      ...) is SKIPPED — no funds move for it and it stays fillable — while the rest still fill.
+    ///      `filled[i]` reports per-order success. Unlike `multicall`, a single bad order does not abort
+    ///      the batch.
+    function fillBatch(Order[] calldata orders, address beneficiary)
+        external
+        nonReentrant
+        whenNotPaused
+        returns (bool[] memory filled)
+    {
+        address payer = msg.sender;
+        address filler = beneficiary == address(0) ? payer : beneficiary;
+        filled = new bool[](orders.length);
+        for (uint256 i; i < orders.length; ++i) {
+            // try/catch needs an external call; the OnlySelf trampoline runs under the batch's single
+            // nonReentrant guard. A reverting order rolls back fully (its pull is undone) and is skipped.
+            try this._fillOne(orders[i], filler, payer) {
+                filled[i] = true;
+            } catch {
+                emit FillSkipped(i, orders[i].hash());
+            }
+        }
+    }
+
+    /// @dev `OnlySelf` trampoline enabling `fillBatch`'s per-order `try`/`catch`. Not `nonReentrant`, so
+    ///      the self-call passes the caller's guard — mirrors `CallbackExecutor._executeDelivery`.
+    function _fillOne(Order calldata order, address filler, address payer) external {
+        if (msg.sender != address(this)) revert OnlySelf();
+        _fill(order, filler, payer);
+    }
+
+    /// @dev Shared fill body: record `filler` (reimbursed at settle), pull the payout from `payer` (which
+    ///      must have approved this adapter), then deliver it to the user-signed recipient. `filler` and
+    ///      `payer` may differ, but neither can redirect the payout away from `order.recipient`.
+    function _fill(Order calldata order, address filler, address payer) internal returns (bytes32 orderId) {
         address token;
         address recipient;
         uint256 payout;
         uint256 fee;
-        (orderId, token, recipient, payout, fee) = _prepareFill(order, msg.sender);
-        SafeTransferLib.safeTransferFrom(token, msg.sender, address(this), payout);
+        (orderId, token, recipient, payout, fee) = _prepareFill(order, filler);
+        SafeTransferLib.safeTransferFrom(token, payer, address(this), payout);
         _deliverOrderWithHook(orderId, token, recipient, payout, order.hookData, order.callbackGasLimit);
-        emit OrderFilled(orderId, msg.sender, payout, fee, uint40(block.timestamp));
+        emit OrderFilled(orderId, filler, payout, fee, uint40(block.timestamp));
     }
 
     /// @notice Fill `order` on behalf of `filler`, pulling the payout from `filler` via a Permit2

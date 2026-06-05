@@ -50,6 +50,13 @@ For CCTP there are two settlement modes. `mintFee == 0` keeps the legacy direct 
 anyone calls `execute(message, attestation)`, earns `mintFee`, and the executor forwards the remaining
 USDC to the adapter, which settles via `onCctpExecute`. The shared `Order` and `orderId` are unchanged.
 
+**Batching & directed payout.** A relayer can bundle many mints into one transaction via
+`executeBatch(messages[], attestations[], feeRecipient)` (and fills via `fillBatch(orders[], beneficiary)`)
+with **partial success** — an item that reverts (already relayed/filled, stale attestation) is skipped,
+not aborting the batch — and can direct its own `mintFee`/reimbursement to a chosen address
+(`executeTo` / `fillTo`). These move only the relayer's own funds; the user-signed delivery target and
+recipient stay authoritative.
+
 **The load-bearing invariant.** `orderId = keccak256(abi.encode(order))` is computed identically at source-encode, at fill, and at settle. The order data settles through the bridge's *authenticated* channel, so a relayer that fills against a fabricated order computes an orderId no settling message will reproduce, and is simply never reimbursed. **Fills are trustless: a careless or malicious filler can only lose its own funds** — never the recipient's, the protocol's, or another filler's. That is why filling is permissionless by default.
 
 Each order moves through a one-slot status machine:

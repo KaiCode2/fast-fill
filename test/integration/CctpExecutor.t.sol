@@ -360,4 +360,101 @@ contract CctpExecutorTest is Fixtures {
         assertEq(tokenMessenger.burnCount(), 0, "no CCTP burn");
         assertEq(usdc.balanceOf(user), INPUT, "funds not pulled");
     }
+
+    // ---------------------------------------------------------------------------------------------
+    // Batched relay (executeBatch) + caller-directed fee (executeTo)
+    // ---------------------------------------------------------------------------------------------
+
+    function _fwdMessage(address target, uint256 mintFee, uint256 amount, uint256 feeExecuted, bytes32 nonce)
+        internal
+        view
+        returns (bytes memory)
+    {
+        ExecHook memory h = ExecHook({
+            mintFee: mintFee,
+            target: target.toBytes32(),
+            gasLimit: 0, // forward-only
+            refundTo: target.toBytes32(),
+            payload: hex""
+        });
+        return _execMessage(h, amount, feeExecuted, nonce);
+    }
+
+    function test_executeBatch_partialSuccess_skipsAlreadyRelayedAndInvalid() public {
+        address treasury = makeAddr("treasury");
+        address t0 = makeAddr("t0");
+        address t3 = makeAddr("t3");
+        uint256 fe = 4e5;
+        uint256 forwarded = INPUT - fe - MINT_FEE;
+
+        bytes memory m0 = _fwdMessage(t0, MINT_FEE, INPUT, fe, bytes32(uint256(20)));
+        bytes memory m1 = _fwdMessage(makeAddr("t1"), MINT_FEE, INPUT, fe, bytes32(uint256(21)));
+        bytes memory m2 = _fwdMessage(makeAddr("t2"), INPUT, INPUT, fe, bytes32(uint256(22))); // mintFee > minted
+        bytes memory m3 = _fwdMessage(t3, MINT_FEE, INPUT, fe, bytes32(uint256(23)));
+
+        // Pre-relay m1 (via a different relayer) so its nonce is already consumed.
+        vm.chainId(DST_CHAIN);
+        vm.prank(makeAddr("otherRelayer"));
+        cctpExec.execute(m1, "");
+
+        bytes[] memory msgs = new bytes[](4);
+        msgs[0] = m0;
+        msgs[1] = m1;
+        msgs[2] = m2;
+        msgs[3] = m3;
+        bytes[] memory atts = new bytes[](4);
+
+        vm.prank(mintRelayer);
+        bool[] memory filled = cctpExec.executeBatch(msgs, atts, treasury);
+
+        assertEq(filled.length, 4, "result length");
+        assertTrue(filled[0], "m0 filled");
+        assertFalse(filled[1], "m1 already relayed => skipped");
+        assertFalse(filled[2], "m2 invalid (mintFee>minted) => skipped");
+        assertTrue(filled[3], "m3 filled");
+
+        // Only m0 + m3 delivered; treasury (not the submitter) earned both fees.
+        assertEq(usdc.balanceOf(t0), forwarded, "t0 forwarded");
+        assertEq(usdc.balanceOf(t3), forwarded, "t3 forwarded");
+        assertEq(usdc.balanceOf(treasury), 2 * MINT_FEE, "treasury earned both successful fees");
+        assertEq(usdc.balanceOf(mintRelayer), 0, "submitter earned no fee (redirected)");
+
+        // The skipped invalid item's nonce stays redeemable; the successes consumed theirs.
+        assertFalse(transmitter.usedNonces(bytes32(uint256(22))), "m2 nonce unconsumed");
+        assertTrue(transmitter.usedNonces(bytes32(uint256(20))), "m0 consumed");
+        assertTrue(transmitter.usedNonces(bytes32(uint256(23))), "m3 consumed");
+    }
+
+    function test_executeBatch_lengthMismatch_reverts() public {
+        bytes[] memory msgs = new bytes[](2);
+        bytes[] memory atts = new bytes[](1);
+        vm.chainId(DST_CHAIN);
+        vm.expectRevert(CctpExecutor.LengthMismatch.selector);
+        cctpExec.executeBatch(msgs, atts, address(0));
+    }
+
+    function test_executeTo_redirectsFeeButNotDelivery() public {
+        address treasury = makeAddr("treasury2");
+        address target = makeAddr("execTarget");
+        uint256 fe = 4e5;
+        bytes memory m = _fwdMessage(target, MINT_FEE, INPUT, fe, bytes32(uint256(30)));
+
+        vm.chainId(DST_CHAIN);
+        vm.prank(mintRelayer);
+        cctpExec.executeTo(m, "", treasury);
+
+        // Fee follows the caller's choice; the attested delivery target is untouched.
+        assertEq(usdc.balanceOf(treasury), MINT_FEE, "fee to treasury");
+        assertEq(usdc.balanceOf(mintRelayer), 0, "submitter earned nothing");
+        assertEq(usdc.balanceOf(target), INPUT - fe - MINT_FEE, "delivery unchanged");
+    }
+
+    function test_executeTo_zeroFeeRecipient_defaultsToSender() public {
+        address target = makeAddr("execTarget2");
+        bytes memory m = _fwdMessage(target, MINT_FEE, INPUT, 4e5, bytes32(uint256(31)));
+        vm.chainId(DST_CHAIN);
+        vm.prank(mintRelayer);
+        cctpExec.executeTo(m, "", address(0));
+        assertEq(usdc.balanceOf(mintRelayer), MINT_FEE, "fee defaults to msg.sender");
+    }
 }
