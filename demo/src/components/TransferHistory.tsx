@@ -20,6 +20,11 @@ export function TransferHistory({ transfers }: { transfers: TransferRecord[] }) 
                 <span className="text-slate-500">
                   {REGISTRY[t.srcChainId].shortName} → {REGISTRY[t.dstChainId].shortName}
                 </span>
+                {t.hookKind && t.hookKind !== "none" && (
+                  <span className="pill ml-2 border-accent/40 bg-accent/10 text-accent">
+                    {t.hookKind === "aave" ? "→ Aave" : `→ Swap ${t.swapTokenSymbol ?? ""}`.trim()}
+                  </span>
+                )}
               </div>
               <span className="pill border-edge bg-panel text-slate-400">{t.mode}</span>
             </div>

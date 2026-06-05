@@ -69,11 +69,7 @@ export function useBalances() {
   return {
     balances: SUPPORTED_CHAIN_IDS.map((id) => byChain[id]),
     isLoading: tokenReads.isLoading,
-    refetch: () => {
-      void tokenReads.refetch();
-      void nArb.refetch();
-      void nOp.refetch();
-      void nBase.refetch();
-    },
+    // Awaitable so callers can show a spinner that lasts the whole refresh (token multicall + natives).
+    refetch: () => Promise.all([tokenReads.refetch(), nArb.refetch(), nOp.refetch(), nBase.refetch()]),
   };
 }

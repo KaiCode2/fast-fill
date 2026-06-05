@@ -125,7 +125,7 @@ async function runFillStage(job: OrderJob) {
 async function runSettleStage(job: OrderJob) {
   const oc = await readOnchain(job);
   if (oc?.status === 2) {
-    patchJob(job.orderId, { phase: "SETTLED", onchainStatus: 2, filler: oc.filler });
+    patchJob(job.orderId, { phase: "SETTLED", onchainStatus: 2, filler: oc.filler, error: undefined });
     return;
   }
   if (oc?.status === 1 && !job.onchainStatus) patchJob(job.orderId, { onchainStatus: 1, filler: oc.filler });
@@ -155,14 +155,27 @@ async function runSettleStage(job: OrderJob) {
     return;
   }
 
+  // Relay Mint (executor-routed) orders bind the CCTP message's destinationCaller to the CctpExecutor,
+  // so the adapter's direct `settle` can never consume them — the executor (primary relayer) does.
+  // Once detected, stop re-simulating a settle that always reverts and just watch getOrder land it.
+  if (job.executorRouted) {
+    patchJob(job.orderId, { phase: "ATTESTING" });
+    return backoff(job);
+  }
+
   patchJob(job.orderId, { phase: "SETTLING" });
   try {
     const hash = await settleCctp(job.dstChainId, att.message, att.attestation);
-    patchJob(job.orderId, { phase: "SETTLED", settleTxHash: hash, onchainStatus: 2 });
+    patchJob(job.orderId, { phase: "SETTLED", settleTxHash: hash, onchainStatus: 2, error: undefined });
   } catch (e) {
     const after = await readOnchain(job);
     if (after?.status === 2) {
-      patchJob(job.orderId, { phase: "SETTLED", onchainStatus: 2 });
+      patchJob(job.orderId, { phase: "SETTLED", onchainStatus: 2, error: undefined });
+    } else if (isExecutorRoutedRevert(e)) {
+      // Expected for Relay Mint orders: the executor settles it. Defer and keep polling getOrder —
+      // not a user-facing error.
+      patchJob(job.orderId, { phase: "ATTESTING", executorRouted: true, error: undefined });
+      backoff(job);
     } else {
       patchJob(job.orderId, { phase: "ATTESTING", error: clip(e) });
       backoff(job);
@@ -171,6 +184,10 @@ async function runSettleStage(job: OrderJob) {
 }
 
 const clip = (e: unknown) => (e instanceof Error ? e.message : String(e)).slice(0, 160);
+
+/** The CCTP MessageTransmitter revert when a non-bound caller tries to consume an executor-routed message. */
+const isExecutorRoutedRevert = (e: unknown) =>
+  /invalid caller for message/i.test(e instanceof Error ? e.message : String(e));
 
 async function processJob(job: OrderJob) {
   if (job.inflight || Date.now() < job.nextActionAt) return;

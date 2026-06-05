@@ -27,6 +27,7 @@ export interface OrderJob {
   lzStatus?: string;
   filler?: Hex;
   onchainStatus?: number;
+  executorRouted?: boolean; // Relay Mint order: settlement is consumed by the CctpExecutor, not adapter.settle
   error?: string;
   attempts: number;
   nextActionAt: number;
