@@ -142,14 +142,18 @@ abstract contract FastFillBase is IFastFill, CallbackExecutor, Ownable, Multical
     {
         address payer = msg.sender;
         address filler = beneficiary == address(0) ? payer : beneficiary;
-        filled = new bool[](orders.length);
-        for (uint256 i; i < orders.length; ++i) {
+        uint256 n = orders.length;
+        filled = new bool[](n);
+        for (uint256 i; i < n;) {
             // try/catch needs an external call; the OnlySelf trampoline runs under the batch's single
             // nonReentrant guard. A reverting order rolls back fully (its pull is undone) and is skipped.
             try this._fillOne(orders[i], filler, payer) {
                 filled[i] = true;
             } catch {
                 emit FillSkipped(i, orders[i].hash());
+            }
+            unchecked {
+                ++i; // bounded by `n` (array length); cannot overflow
             }
         }
     }

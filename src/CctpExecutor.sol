@@ -119,10 +119,11 @@ contract CctpExecutor is CallbackExecutor, Ownable {
         whenNotPaused
         returns (bool[] memory filled)
     {
-        if (messages.length != attestations.length) revert LengthMismatch();
+        uint256 n = messages.length;
+        if (n != attestations.length) revert LengthMismatch();
         address feeEarner = feeRecipient == address(0) ? msg.sender : feeRecipient;
-        filled = new bool[](messages.length);
-        for (uint256 i; i < messages.length; ++i) {
+        filled = new bool[](n);
+        for (uint256 i; i < n;) {
             // try/catch needs an external call; the OnlySelf trampoline runs under the batch's single
             // nonReentrant guard. A reverting item rolls back fully (its nonce stays unconsumed) and is
             // skipped — successful siblings are unaffected.
@@ -130,6 +131,9 @@ contract CctpExecutor is CallbackExecutor, Ownable {
                 filled[i] = true;
             } catch {
                 emit BatchItemSkipped(i, keccak256(messages[i]));
+            }
+            unchecked {
+                ++i; // bounded by `n` (array length); cannot overflow
             }
         }
     }
