@@ -194,6 +194,36 @@ contract DestinationExecutionTest is Fixtures {
         assertEq(dstCctp.claimable(address(receiver), address(usdc)), payout, "gas-exhausted hook => claimable");
     }
 
+    function test_callbackCannotForgeGasSentinel_36ByteSelector() public {
+        // A hostile callback reverts with exactly 36 bytes whose first 4 ARE the InsufficientCallbackGas
+        // selector. The catch matches the in-frame gas guard by LENGTH (== 68), so this is NOT mistaken for
+        // it: the fill is not aborted, the funds route to the claim ledger. (If a callback could forge the
+        // guard it could abort fills at will and grief relayers.)
+        bytes memory forged = abi.encodePacked(CallbackExecutor.InsufficientCallbackGas.selector, bytes32(uint256(1)));
+        assertEq(forged.length, 36, "precondition: 36-byte payload");
+        receiver.setMode(MockFastFillReceiver.Mode.RevertCustom);
+        receiver.setRevertData(forged);
+        Order memory o = _order(address(receiver), 200_000, HOOK);
+        uint256 payout = _fill(o);
+        assertEq(dstCctp.claimable(address(receiver), address(usdc)), payout, "forged 36-byte sentinel => claimable");
+    }
+
+    function test_callbackCannotForgeGasSentinel_full68ByteEncoding() public {
+        // A hostile callback reverts with the FULL 68-byte InsufficientCallbackGas encoding. `tryCall` caps
+        // the bubbled returndata at CALLBACK_RETURNDATA_LIMIT (36 bytes), so it can never reach the catch as
+        // 68 bytes — it is truncated and routes to the claim ledger rather than aborting the fill.
+        bytes memory forged =
+            abi.encodeWithSelector(CallbackExecutor.InsufficientCallbackGas.selector, uint256(7), uint256(9));
+        assertEq(forged.length, 68, "precondition: 68-byte payload");
+        receiver.setMode(MockFastFillReceiver.Mode.RevertCustom);
+        receiver.setRevertData(forged);
+        Order memory o = _order(address(receiver), 200_000, HOOK);
+        uint256 payout = _fill(o);
+        assertEq(
+            dstCctp.claimable(address(receiver), address(usdc)), payout, "full 68-byte encoding truncated => claimable"
+        );
+    }
+
     function test_hookReentrancy_blocked_routesToClaimable() public {
         // The receiver tries to re-enter the adapter; the nonReentrant guard reverts the inner call,
         // so onFastFill reverts and the funds route to the claim ledger.

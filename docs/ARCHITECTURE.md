@@ -489,11 +489,15 @@ but is strictly safer: because the transfer and the callback share one revertabl
 deterministically-failing hook can never strand the bridged funds — they always end delivered,
 redirected, or claimable. Hardening:
 
-- **Gas cap.** Creation rejects `callbackGasLimit > 5,000,000`. Delivery forwards exactly
-  `callbackGasLimit`; the adapter first requires enough gas remains (EIP-150 63/64) so a relayer
-  cannot starve the user's signed budget (else `fill`/`settle` reverts, forcing a retry). The limit is
-  signed — in the order and the Permit2 witness — so the relayer prices it into the base fee and a
-  sponsor cannot alter it.
+- **Gas cap & guaranteed budget.** Creation rejects `callbackGasLimit > 5,000,000`. The receiver call is
+  reached through two nested EIP-150 63/64 deductions (the delivery self-call, then the call to the
+  receiver), so an exact check immediately before that call requires `gasleft ≥ ceil(callbackGasLimit ·
+  64/63) + slack`, guaranteeing the receiver is forwarded its **full** signed budget. A relayer sets the
+  transaction's total gas but not this signed limit, and cannot land a fill while starving the callback:
+  under-funding reverts the whole `fill`/`settle` (forcing a retry) rather than committing with a starved
+  callback routed to the claim ledger. (A callback that exhausts its *full* budget still routes to
+  `claimable` — that is the user's own budget sizing, not a relayer lever.) The limit is signed — in the
+  order and the Permit2 witness — so the relayer prices it into the base fee and a sponsor cannot alter it.
 - **Return-bomb-safe.** The revert data is copied with a bounded length (enough for `RedirectFunds`),
   so a receiver cannot grief the relayer with a huge returndata payload.
 - **Reentrancy.** Delivery runs inside the existing `nonReentrant` fill/settle with effects written
@@ -562,6 +566,7 @@ speed / executor of a signed intent.
 | Sponsor altering a signed intent | Permit2 witness binds the order intent / orderId **and the opted-into bridge mode** (`bridgeParams`); a tampered order — or a flipped fast/slow / executor option — recovers a different signer and reverts (both proven against real Permit2). |
 | Reentrancy | `nonReentrant` + checks-effects-interactions (status before transfers). |
 | Hostile destination receiver | The `onFastFill` callback is gas-capped, return-bomb-safe, runs behind `nonReentrant` in an atomic transfer+call frame; any failure routes to redirect/claimable — it can never brick the fill/settle, strand funds, or keep funds it wasn't owed. |
+| Relayer under-funding destination gas | An exact in-frame check requires `gasleft ≥ callbackGasLimit · 64/63 + slack` immediately before the receiver call (covering both nested EIP-150 63/64 deductions), so a committed fill always forwarded the callback its **full** signed budget; a relayer that under-funds the tx reverts the whole `fill`/`settle` (forcing a retry) instead of starving the callback into `claimable[recipient]`. The starvation revert is re-thrown unforgeably (its 68-byte error length is unreachable by a callback, whose revert data is capped at 36 bytes). |
 | Recipient/filler revert (e.g. USDC blacklist) | `_payout` falls back to the `claimable` ledger; settlement still completes. |
 | Surplus theft | Surplus is computed inside the authenticated settle and always routed to `order.recipient`; the filler is hard-capped at `outputAmount`. |
 | Underpaying the user on fill | `fill` computes `payout` on-chain and pulls exactly that from the relayer. |

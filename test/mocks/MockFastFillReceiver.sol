@@ -16,7 +16,8 @@ contract MockFastFillReceiver is IFastFillReceiver {
         BurnGas, // consume all forwarded gas (INVALID) → claimable
         ReturnBomb, // revert with a large payload → bounded copy, still claimable
         Reenter, // call back into the adapter (guard must block) → claimable
-        StealThenRevert // move the received funds out, then revert → claw-back must undo the move
+        StealThenRevert, // move the received funds out, then revert → claw-back must undo the move
+        RevertCustom // revert with caller-supplied exact bytes → proves the gas-guard sentinel can't be forged
     }
 
     Mode public mode;
@@ -31,6 +32,12 @@ contract MockFastFillReceiver is IFastFillReceiver {
     uint256 public lastAmount;
     bytes public lastHookData;
     uint256 public callCount;
+
+    // Gas remaining at the first opcode of `onFastFill` — lets a test prove the callback received its
+    // full forwarded budget (gasAtEntry ≈ callbackGasLimit) rather than a starved fraction.
+    uint256 public gasAtEntry;
+    // Exact revert payload emitted in RevertCustom mode (set by the test).
+    bytes public revertData;
 
     function setMode(Mode m) external {
         mode = m;
@@ -49,7 +56,12 @@ contract MockFastFillReceiver is IFastFillReceiver {
         reenterCalldata = cd;
     }
 
+    function setRevertData(bytes calldata d) external {
+        revertData = d;
+    }
+
     function onFastFill(bytes32 orderId, address token, uint256 amount, bytes calldata hookData) external {
+        gasAtEntry = gasleft();
         lastOrderId = orderId;
         lastToken = token;
         lastAmount = amount;
@@ -79,6 +91,13 @@ contract MockFastFillReceiver is IFastFillReceiver {
             (bool moved,) = token.call(abi.encodeWithSelector(0xa9059cbb, stash, amount)); // transfer(stash, amount)
             moved; // referenced only to silence the unused-return warning
             revert(); // the revert must roll the transfer above back too → adapter reclaims the funds
+        }
+        if (m == Mode.RevertCustom) {
+            bytes memory rd = revertData;
+            /// @solidity memory-safe-assembly
+            assembly {
+                revert(add(rd, 0x20), mload(rd))
+            }
         }
     }
 }
