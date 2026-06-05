@@ -76,17 +76,26 @@ abstract contract Fixtures is Test {
 
     function _setUpCctp() internal {
         usdc = new MockUSDC();
-        transmitterSrc = new MockMessageTransmitterV2(address(usdc), SRC_DOMAIN);
-        transmitterDst = new MockMessageTransmitterV2(address(usdc), DST_DOMAIN);
-        messengerSrc = new MockTokenMessengerV2(address(transmitterSrc));
-        messengerDst = new MockTokenMessengerV2(address(transmitterDst));
-        tokenMessenger = messengerSrc;
-        transmitter = transmitterDst;
+        // One shared MessageTransmitter + TokenMessenger model BOTH chain roles. The adapters now cache
+        // their LOCAL bridge config in immutables at construction, so a single instance can no longer
+        // resolve a different messenger per `block.chainid`; src and dst therefore share one, and the two
+        // chains are distinguished by the order's chainIds + the registry's per-chain domains (resolved
+        // remotely at runtime). The transmitter's domain is SRC_DOMAIN to match the construction chain
+        // (SRC_CHAIN) — the cached local domain is only read by the constructor's cross-check.
+        transmitter = new MockMessageTransmitterV2(address(usdc), SRC_DOMAIN);
+        tokenMessenger = new MockTokenMessengerV2(address(transmitter));
+        transmitterSrc = transmitter;
+        transmitterDst = transmitter;
+        messengerSrc = tokenMessenger;
+        messengerDst = tokenMessenger;
 
         cctpConfig = new MockFastFillConfig();
-        cctpConfig.set(SRC_CHAIN, ChainConfig(true, SRC_DOMAIN, 0, address(usdc), address(messengerSrc)));
-        cctpConfig.set(DST_CHAIN, ChainConfig(true, DST_DOMAIN, 0, address(usdc), address(messengerDst)));
+        cctpConfig.set(SRC_CHAIN, ChainConfig(true, SRC_DOMAIN, 0, address(usdc), address(tokenMessenger)));
+        cctpConfig.set(DST_CHAIN, ChainConfig(true, DST_DOMAIN, 0, address(usdc), address(tokenMessenger)));
 
+        // Construct under SRC_CHAIN so the constructor's local-domain cross-check passes; the cached
+        // locals (usdc/messenger/transmitter) are shared, so they serve the dst role at runtime too.
+        vm.chainId(SRC_CHAIN);
         cctpExec = new CctpExecutor(address(cctpConfig), owner);
         cctp = new CctpAdapter(address(cctpConfig), owner, MAX_FEE_RATE, address(cctpExec));
         srcCctp = cctp;
@@ -110,6 +119,10 @@ abstract contract Fixtures is Test {
         oftConfig.setOft(SRC_CHAIN, oftId, OftDeployment(address(oftToken), address(oftToken)));
         oftConfig.setOft(DST_CHAIN, oftId, OftDeployment(address(oftToken), address(oftToken)));
 
+        // Construct under SRC_CHAIN so the constructor's eid cross-check passes (cached
+        // chainConfig(SRC).lzEid == the shared endpoint's eid, both SRC_EID); the cached OFT/token/endpoint
+        // are shared, so they serve the dst role at runtime too.
+        vm.chainId(SRC_CHAIN);
         oft = new OftAdapter(address(oftConfig), owner, MAX_FEE_RATE, oftId);
         srcOft = oft;
         dstOft = oft;
