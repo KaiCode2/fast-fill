@@ -63,8 +63,11 @@ abstract contract FastFillBase is IFastFill, CallbackExecutor, Ownable, Multical
     /// @notice Destination-chain record for each order, keyed by orderId.
     mapping(bytes32 orderId => OrderRecord) internal _orders;
 
-    /// @notice Per-adapter governance cap on the fee rate, WAD (<= 1e18).
-    uint256 public maxFeeRate;
+    /// @notice Per-adapter governance cap on the fee rate, WAD (<= 1e18, which fits in uint64). Declared
+    ///         as `uint64` so it packs into ONE slot with `_nonceCounter` + `paused` (8 + 8 + 1 bytes):
+    ///         on `fill`, `whenNotPaused` reads `paused` and warms the slot, so the pricing read of this
+    ///         is then warm instead of a separate cold SLOAD.
+    uint64 public maxFeeRate;
 
     /// @notice Monotonic counter assigning each source-side order a unique nonce.
     uint64 internal _nonceCounter;
@@ -78,7 +81,7 @@ abstract contract FastFillBase is IFastFill, CallbackExecutor, Ownable, Multical
     constructor(address owner_, uint256 maxFeeRate_) {
         if (maxFeeRate_ > PricingLib.WAD) revert InvalidMaxFeeRate(maxFeeRate_);
         _initializeOwner(owner_);
-        maxFeeRate = maxFeeRate_;
+        maxFeeRate = uint64(maxFeeRate_); // <= WAD (1e18) < uint64 max, checked above
     }
 
     modifier whenNotPaused() {
@@ -96,11 +99,6 @@ abstract contract FastFillBase is IFastFill, CallbackExecutor, Ownable, Multical
     /// @dev Validate that `order.outputToken` is the token this adapter settles in, and return
     ///      its ERC20 address. Reverts on mismatch. Used by both `fill` and `_settle`.
     function _resolveOutputToken(Order memory order) internal view virtual returns (address token);
-
-    /// @dev Revert unless `chainId` is a supported counterpart for this bridge (per the config
-    ///      registry). This is the "does the remote chain exist" check that replaces the old
-    ///      remote-adapter registry now that the counterpart is always `address(this)`.
-    function _requireSupportedRemote(uint32 chainId) internal view virtual;
 
     // ---------------------------------------------------------------------------------------------
     // Optimistic fill (destination, before the bridge message arrives)
@@ -402,10 +400,10 @@ abstract contract FastFillBase is IFastFill, CallbackExecutor, Ownable, Multical
         _nonceCounter = nonce + 1;
     }
 
-    /// @dev Common create-time validation. Adapters add bridge-specific checks (token, domain/eid).
+    /// @dev Common create-time validation (local-only). The destination chain's support is checked by
+    ///      the adapter inline, from its single destination-config read in the initiate path.
     function _assertCreatable(Order memory order) internal view {
         if (order.srcChainId != block.chainid) revert NotSourceChain(order.srcChainId);
-        _requireSupportedRemote(order.dstChainId);
         if (order.expectedDeliveryTime <= order.startTime) {
             revert InvalidWindow(order.startTime, order.expectedDeliveryTime);
         }
@@ -454,7 +452,7 @@ abstract contract FastFillBase is IFastFill, CallbackExecutor, Ownable, Multical
 
     function setMaxFeeRate(uint256 newMaxFeeRate) external onlyOwner {
         if (newMaxFeeRate > PricingLib.WAD) revert InvalidMaxFeeRate(newMaxFeeRate);
-        maxFeeRate = newMaxFeeRate;
+        maxFeeRate = uint64(newMaxFeeRate); // <= WAD (1e18) < uint64 max, checked above
     }
 
     function setPaused(bool newPaused) external onlyOwner {

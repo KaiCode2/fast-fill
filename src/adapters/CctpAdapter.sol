@@ -108,11 +108,6 @@ contract CctpAdapter is FastFillBase, ICctpExecReceiver {
         return usdc;
     }
 
-    function _requireSupportedRemote(uint32 chainId) internal view override {
-        ChainConfig memory c = config.chainConfig(chainId);
-        if (!c.supported || c.usdc == address(0)) revert UnsupportedChain(chainId);
-    }
-
     // ---------------------------------------------------------------------------------------------
     // Source
     // ---------------------------------------------------------------------------------------------
@@ -149,6 +144,8 @@ contract CctpAdapter is FastFillBase, ICctpExecReceiver {
         if (maxFee >= inputAmount) revert MaxFeeTooHigh(maxFee, inputAmount);
         if (mintFee >= inputAmount - maxFee) revert MintFeeTooHigh(mintFee, inputAmount - maxFee);
         nonce = _nextNonce();
+        ChainConfig memory dc = config.chainConfig(dstChainId); // single destination-config read
+        if (!dc.supported || dc.usdc == address(0)) revert UnsupportedChain(dstChainId);
         Order memory order = _buildOrder(
             msg.sender,
             dstChainId,
@@ -159,13 +156,14 @@ contract CctpAdapter is FastFillBase, ICctpExecReceiver {
             deliveryWindow,
             discountRate,
             baseFee,
-            nonce
+            nonce,
+            dc.usdc
         );
         order.callbackGasLimit = exec.gasLimit;
         order.hookData = exec.data;
         _assertCreatable(order);
         SafeTransferLib.safeTransferFrom(usdc, msg.sender, address(this), inputAmount);
-        orderId = _finishInitiate(order, maxFee, mintFee, minFinalityThreshold);
+        orderId = _finishInitiate(order, maxFee, mintFee, minFinalityThreshold, dc.cctpDomain);
     }
 
     /// @notice Sponsored initiate: a third party submits, but the USDC is pulled from `from` against
@@ -192,24 +190,39 @@ contract CctpAdapter is FastFillBase, ICctpExecReceiver {
         if (maxFee >= inputAmount) revert MaxFeeTooHigh(maxFee, inputAmount);
         if (mintFee >= inputAmount - maxFee) revert MintFeeTooHigh(mintFee, inputAmount - maxFee);
         nonce = _nextNonce();
+        ChainConfig memory dc = config.chainConfig(dstChainId); // single destination-config read
+        if (!dc.supported || dc.usdc == address(0)) revert UnsupportedChain(dstChainId);
         Order memory order = _buildOrder(
-            from, dstChainId, recipient, inputAmount, maxFee, mintFee, deliveryWindow, discountRate, baseFee, nonce
+            from,
+            dstChainId,
+            recipient,
+            inputAmount,
+            maxFee,
+            mintFee,
+            deliveryWindow,
+            discountRate,
+            baseFee,
+            nonce,
+            dc.usdc
         );
         order.callbackGasLimit = exec.gasLimit;
         order.hookData = exec.data;
         _assertCreatable(order);
         // Pull AFTER building so the witness binds the order (incl. hookData + gas); bind the bridge mode too.
         _pullOrderViaPermit2(order, from, permit, keccak256(abi.encode(maxFee, minFinalityThreshold, mintFee)));
-        orderId = _finishInitiate(order, maxFee, mintFee, minFinalityThreshold);
+        orderId = _finishInitiate(order, maxFee, mintFee, minFinalityThreshold, dc.cctpDomain);
     }
 
     /// @dev Hash, burn, and emit, once the order is built and the USDC is held by this adapter.
-    function _finishInitiate(Order memory order, uint256 maxFee, uint256 mintFee, uint32 minFinalityThreshold)
-        private
-        returns (bytes32 orderId)
-    {
+    function _finishInitiate(
+        Order memory order,
+        uint256 maxFee,
+        uint256 mintFee,
+        uint32 minFinalityThreshold,
+        uint32 dstDomain
+    ) private returns (bytes32 orderId) {
         orderId = order.hash();
-        _dispatchBurn(order, maxFee, mintFee, minFinalityThreshold);
+        _dispatchBurn(order, maxFee, mintFee, minFinalityThreshold, dstDomain);
         emit OrderCreated(
             orderId,
             OrderLib.BRIDGE_CCTP,
@@ -236,19 +249,17 @@ contract CctpAdapter is FastFillBase, ICctpExecReceiver {
         uint64 deliveryWindow,
         uint256 discountRate,
         uint256 baseFee,
-        uint64 nonce
+        uint64 nonce,
+        address dstUsdc
     ) private view returns (Order memory order) {
-        address inUsdc = usdc; // local, cached at construction (guaranteed non-zero)
-        address outUsdc = config.chainConfig(dstChainId).usdc; // remote, per-order
-        if (outUsdc == address(0)) revert UnsupportedChain(dstChainId);
         order = Order({
             bridgeType: OrderLib.BRIDGE_CCTP,
             srcChainId: uint32(block.chainid),
             dstChainId: dstChainId,
             sender: from.toBytes32(),
             recipient: recipient,
-            inputToken: inUsdc.toBytes32(),
-            outputToken: outUsdc.toBytes32(),
+            inputToken: usdc.toBytes32(), // local USDC, cached at construction
+            outputToken: dstUsdc.toBytes32(), // destination USDC, from the single dst-config read
             inputAmount: inputAmount,
             outputAmount: inputAmount - maxFee - mintFee,
             nonce: nonce,
@@ -263,9 +274,13 @@ contract CctpAdapter is FastFillBase, ICctpExecReceiver {
 
     /// @dev Approve the TokenMessenger and burn-with-hook. `mintFee == 0` targets this adapter directly
     ///      (legacy `settle` path); `mintFee > 0` targets the CctpExecutor with an `ExecHook` envelope.
-    function _dispatchBurn(Order memory order, uint256 maxFee, uint256 mintFee, uint32 minFinalityThreshold) private {
-        uint32 dstDomain = config.chainConfig(order.dstChainId).cctpDomain; // remote, per-order
-
+    function _dispatchBurn(
+        Order memory order,
+        uint256 maxFee,
+        uint256 mintFee,
+        uint32 minFinalityThreshold,
+        uint32 dstDomain
+    ) private {
         if (mintFee == 0) {
             // Direct path: this adapter is mintRecipient + destinationCaller; `settle` consumes the
             // message and runs `_settle` atomically.

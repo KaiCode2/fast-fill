@@ -84,12 +84,6 @@ contract OftAdapter is FastFillBase, ILayerZeroComposer {
         return localToken;
     }
 
-    function _requireSupportedRemote(uint32 chainId) internal view override {
-        ChainConfig memory c = config.chainConfig(chainId);
-        OftDeployment memory d = config.oftConfig(chainId, oftId);
-        if (!c.supported || d.oft == address(0) || d.token == address(0)) revert UnsupportedChain(chainId);
-    }
-
     // ---------------------------------------------------------------------------------------------
     // Source
     // ---------------------------------------------------------------------------------------------
@@ -120,14 +114,26 @@ contract OftAdapter is FastFillBase, ILayerZeroComposer {
         Execution calldata exec
     ) external payable whenNotPaused returns (bytes32 orderId, uint64 nonce) {
         nonce = _nextNonce();
+        ChainConfig memory dc = config.chainConfig(dstChainId); // single destination-config read
+        OftDeployment memory dd = config.oftConfig(dstChainId, oftId); // single destination-OFT read
+        if (!dc.supported || dd.oft == address(0) || dd.token == address(0)) revert UnsupportedChain(dstChainId);
         Order memory order = _buildOrder(
-            msg.sender, dstChainId, recipient, inputAmount, minAmountLD, deliveryWindow, discountRate, baseFee, nonce
+            msg.sender,
+            dstChainId,
+            recipient,
+            inputAmount,
+            minAmountLD,
+            deliveryWindow,
+            discountRate,
+            baseFee,
+            nonce,
+            dd.token
         );
         order.callbackGasLimit = exec.gasLimit;
         order.hookData = exec.data;
         _assertCreatable(order);
         SafeTransferLib.safeTransferFrom(localToken, msg.sender, address(this), inputAmount);
-        orderId = _finishInitiate(order, extraOptions);
+        orderId = _finishInitiate(order, extraOptions, dc.lzEid);
     }
 
     /// @notice Sponsored initiate: a third party submits and pays the LayerZero fee (`msg.value`),
@@ -150,21 +156,36 @@ contract OftAdapter is FastFillBase, ILayerZeroComposer {
         PermitLib.Permit2Data calldata permit
     ) external payable whenNotPaused returns (bytes32 orderId, uint64 nonce) {
         nonce = _nextNonce();
+        ChainConfig memory dc = config.chainConfig(dstChainId); // single destination-config read
+        OftDeployment memory dd = config.oftConfig(dstChainId, oftId); // single destination-OFT read
+        if (!dc.supported || dd.oft == address(0) || dd.token == address(0)) revert UnsupportedChain(dstChainId);
         Order memory order = _buildOrder(
-            from, dstChainId, recipient, inputAmount, minAmountLD, deliveryWindow, discountRate, baseFee, nonce
+            from,
+            dstChainId,
+            recipient,
+            inputAmount,
+            minAmountLD,
+            deliveryWindow,
+            discountRate,
+            baseFee,
+            nonce,
+            dd.token
         );
         order.callbackGasLimit = exec.gasLimit;
         order.hookData = exec.data;
         _assertCreatable(order);
         // Pull AFTER building so the witness binds the order (incl. hookData + gas); bind the executor config too.
         _pullOrderViaPermit2(order, from, permit, keccak256(extraOptions));
-        orderId = _finishInitiate(order, extraOptions);
+        orderId = _finishInitiate(order, extraOptions, dc.lzEid);
     }
 
     /// @dev Hash, send, and emit, once the order is built and the token is held by this adapter.
-    function _finishInitiate(Order memory order, bytes calldata extraOptions) private returns (bytes32 orderId) {
+    function _finishInitiate(Order memory order, bytes calldata extraOptions, uint32 dstEid)
+        private
+        returns (bytes32 orderId)
+    {
         orderId = order.hash();
-        _dispatchSend(order, extraOptions);
+        _dispatchSend(order, extraOptions, dstEid);
         emit OrderCreated(
             orderId,
             OrderLib.BRIDGE_OFT,
@@ -188,19 +209,17 @@ contract OftAdapter is FastFillBase, ILayerZeroComposer {
         uint64 deliveryWindow,
         uint256 discountRate,
         uint256 baseFee,
-        uint64 nonce
+        uint64 nonce,
+        address dstToken
     ) private view returns (Order memory order) {
-        address inToken = localToken; // local, cached at construction (guaranteed non-zero)
-        address outToken = config.oftConfig(dstChainId, oftId).token; // remote, per-order
-        if (outToken == address(0)) revert UnsupportedChain(dstChainId);
         order = Order({
             bridgeType: OrderLib.BRIDGE_OFT,
             srcChainId: uint32(block.chainid),
             dstChainId: dstChainId,
             sender: from.toBytes32(),
             recipient: recipient,
-            inputToken: inToken.toBytes32(),
-            outputToken: outToken.toBytes32(),
+            inputToken: localToken.toBytes32(), // local token, cached at construction
+            outputToken: dstToken.toBytes32(), // destination token, from the single dst-OFT read
             inputAmount: inputAmount,
             outputAmount: minAmountLD,
             nonce: nonce,
@@ -215,12 +234,12 @@ contract OftAdapter is FastFillBase, ILayerZeroComposer {
 
     /// @dev Approve the OFT and dispatch the cross-chain send to ourselves on dst. The token is
     ///      already held by this adapter (pulled by the entrypoint).
-    function _dispatchSend(Order memory order, bytes calldata extraOptions) private {
+    function _dispatchSend(Order memory order, bytes calldata extraOptions, uint32 dstEid) private {
         // Local OFT + token are cached at construction (where the live token/eid were cross-checked).
         SafeTransferLib.safeApproveWithRetry(localToken, localOft, order.inputAmount);
 
         SendParam memory sendParam = SendParam({
-            dstEid: config.chainConfig(order.dstChainId).lzEid, // remote, per-order
+            dstEid: dstEid, // destination eid, from the single dst-config read
             to: address(this).toBytes32(), // our adapter on the dst chain (same address)
             amountLD: order.inputAmount,
             minAmountLD: order.outputAmount,
