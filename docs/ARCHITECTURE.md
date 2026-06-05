@@ -50,9 +50,9 @@ flowchart TB
     BASE --> OL
     BASE --> PL
     BASE --> AC
-    CA -- "reads at call time" --> CFG
-    CE -- "reads at call time" --> CFG
-    OA -- "reads at call time" --> CFG
+    CA -- "reads (ctor: locals; call: remote)" --> CFG
+    CE -- "reads (ctor: locals; call: remote)" --> CFG
+    OA -- "reads (ctor: locals; call: remote)" --> CFG
     CA --> BL
     CA --> EL
     CE --> BL
@@ -72,7 +72,7 @@ initiates outbound transfers *and* settles inbound ones, and is deployed on ever
 |---|---|
 | `CallbackExecutor` | Shared transfer+callback substrate: `_payout` fallback, `claim`/`claimable`, atomic transfer+hook execution, redirect parsing, return-data bounding, callback gas checks |
 | `FastFillBase` | Order book, status machine, `fill`/`fillFor`, `_settle`, fast-fill destination-execution callback (`onFastFill`), pricing call, pause, ownership, EIP-2612 `selfPermit` + Permit2 pulls + `Multicallable` |
-| `FastFillConfig` | Immutable CREATE2 chain registry — per-chain CCTP/LZ transport (`chainConfig`) plus each OFT's `(oft, token)` keyed by `(chainId, oftId)` (`oftConfig`); the single source the adapters read at call time |
+| `FastFillConfig` | Immutable CREATE2 chain registry — per-chain CCTP/LZ transport (`chainConfig`) plus each OFT's `(oft, token)` keyed by `(chainId, oftId)` (`oftConfig`); the single source the adapters read — LOCAL config once at construction (cached as immutables), REMOTE config per call |
 | `CctpAdapter` | `initiateCCTP`/`initiateCCTPFor` (burn-with-hook), direct `settle(message, attestation)`, routed `onCctpExecute(...)` from `CctpExecutor` |
 | `CctpExecutor` | Generic permissionless CCTP mint-relay: consumes executor-routed CCTP messages (single `execute`/`executeTo` or partial-success `executeBatch`), pays `mintFee` to the caller or a caller-named recipient, forwards USDC to a recipient or calls `onCctpExecute` on a receiver |
 | `OftAdapter` | One per OFT (selected by `oftId`): `initiateOFT` (`send` with `composeMsg`) and `lzCompose` (LayerZero compose callback) |
@@ -592,7 +592,7 @@ speed / executor of a signed intent.
 | Caller redirecting bridged funds via a flavour | `executeTo`/`executeBatch` (and `fillTo`/`fillBatch`) only redirect the relayer's OWN `mintFee`/reimbursement; the delivery `target` (attested envelope) and `recipient` (signed order) stay authoritative, so a caller cannot route the user's funds to itself. |
 | Batch item griefing siblings | Each `executeBatch`/`fillBatch` item runs in its own `try`/`catch` self-call under one `nonReentrant` guard; a reverting item rolls back fully (nonce unconsumed / no pull) and is skipped, never aborting the batch or touching successful items. |
 | Forged OFT compose | Three gates: endpoint, local OFT, `composeFrom == address(this)`. |
-| Misconfigured registry | Local domain/eid/token are read live from the bridge contracts and cross-checked against `FastFillConfig`; a mismatch reverts. |
+| Misconfigured registry | At construction, local domain/eid/token are read live from the bridge contracts and cross-checked against `FastFillConfig`, then cached as immutables; a mismatch reverts the deployment, so a wrong constant can never silently ship. |
 | Sponsor altering a signed intent | Permit2 witness binds the order intent / orderId **and the opted-into bridge mode** (`bridgeParams`); a tampered order — or a flipped fast/slow / executor option — recovers a different signer and reverts (both proven against real Permit2). |
 | Reentrancy | `nonReentrant` + checks-effects-interactions (status before transfers). |
 | Hostile destination receiver | The `onFastFill` callback is gas-capped, return-bomb-safe, runs behind `nonReentrant` in an atomic transfer+call frame; any failure routes to redirect/claimable — it can never brick the fill/settle, strand funds, or keep funds it wasn't owed. |

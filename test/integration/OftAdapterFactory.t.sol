@@ -6,6 +6,9 @@ import {OftAdapterFactory} from "../../src/adapters/OftAdapterFactory.sol";
 import {OftAdapter} from "../../src/adapters/OftAdapter.sol";
 import {OftId} from "../../src/libraries/OftId.sol";
 import {MockFastFillConfig} from "../mocks/MockFastFillConfig.sol";
+import {MockOFT} from "../mocks/MockOFT.sol";
+import {MockLzEndpoint} from "../mocks/MockLzEndpoint.sol";
+import {ChainConfig, OftDeployment} from "../../src/interfaces/IFastFillConfig.sol";
 
 /// @notice The factory is the "deploy a new OFT in one call" surface. These tests pin the properties
 ///         the fast-fill security model leans on: the adapter address is fully determined by the
@@ -14,12 +17,29 @@ import {MockFastFillConfig} from "../mocks/MockFastFillConfig.sol";
 contract OftAdapterFactoryTest is Test {
     MockFastFillConfig internal config;
     OftAdapterFactory internal factory;
+    MockLzEndpoint internal endpoint;
+    MockOFT internal oftToken;
 
     address internal owner = makeAddr("owner");
     uint256 internal constant MAX_FEE_RATE = 5e15;
+    uint32 internal constant CHAIN = 1;
+    uint32 internal constant EID = 30_101;
 
     function setUp() public {
         config = new MockFastFillConfig();
+        // The adapter constructor now resolves + cross-checks its local OFT against the registry, so the
+        // factory must deploy on a configured chain. Every tested oftId resolves to one shared mock OFT;
+        // the adapters differ only by the oftId baked into their CREATE2 salt, so addresses stay distinct.
+        endpoint = new MockLzEndpoint(EID);
+        oftToken = new MockOFT(address(endpoint));
+        config.set(CHAIN, ChainConfig(true, 0, EID, address(0), address(0)));
+        config.setOft(CHAIN, OftId.USDT0, OftDeployment(address(oftToken), address(oftToken)));
+        config.setOft(CHAIN, OftId.USDE, OftDeployment(address(oftToken), address(oftToken)));
+        config.setOft(CHAIN, OftId.SUSDE, OftDeployment(address(oftToken), address(oftToken)));
+        config.setOft(CHAIN, OftId.ENA, OftDeployment(address(oftToken), address(oftToken)));
+        config.setOft(CHAIN, OftId.USDTB, OftDeployment(address(oftToken), address(oftToken)));
+        vm.chainId(CHAIN);
+
         factory = new OftAdapterFactory(address(config), owner, MAX_FEE_RATE);
     }
 

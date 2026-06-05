@@ -35,6 +35,15 @@ contract CctpExecutor is CallbackExecutor, Ownable {
     /// @notice The immutable chain registry. Same address on every chain (CREATE2).
     IFastFillConfig public immutable config;
 
+    /// @notice This chain's USDC and CCTP MessageTransmitter, resolved from the registry ONCE at
+    ///         construction and cached. Every relay would otherwise pay a cold external view call to the
+    ///         registry (plus a call into the TokenMessenger) just to learn them. Safe as immutables:
+    ///         the registry is immutable and this contract is pinned to one chain at deploy. Reading them
+    ///         from the registry in the constructor (rather than via constructor args) keeps the CREATE2
+    ///         init-code identical across chains, so the deterministic address is unchanged.
+    address public immutable usdc;
+    address public immutable transmitter;
+
     /// @notice When true, `execute` is blocked (claim is never blocked). In-flight messages can always
     ///         be self-redeemed once unpaused; the CCTP message stays valid until consumed.
     bool public paused;
@@ -66,7 +75,11 @@ contract CctpExecutor is CallbackExecutor, Ownable {
 
     constructor(address config_, address owner_) {
         _initializeOwner(owner_);
-        config = IFastFillConfig(config_);
+        IFastFillConfig cfg = IFastFillConfig(config_);
+        config = cfg;
+        ChainConfig memory lc = cfg.chainConfig(block.chainid);
+        usdc = lc.usdc;
+        transmitter = ITokenMessengerV2(lc.cctpTokenMessenger).localMessageTransmitter();
     }
 
     modifier whenNotPaused() {
@@ -80,8 +93,7 @@ contract CctpExecutor is CallbackExecutor, Ownable {
     ///         only consumption path. If no relayer finds the `mintFee` worthwhile, the burner (or
     ///         anyone) can self-redeem by calling this and paying the fee to themselves (net zero).
     function execute(bytes calldata message, bytes calldata attestation) external nonReentrant whenNotPaused {
-        (address usdc, address transmitter) = _localUsdcAndTransmitter();
-        _execute(usdc, transmitter, message, attestation, msg.sender);
+        _execute(message, attestation, msg.sender);
     }
 
     /// @notice Like `execute`, but the caller directs the `mintFee` to `feeRecipient` (e.g. a hot wallet
@@ -93,8 +105,7 @@ contract CctpExecutor is CallbackExecutor, Ownable {
         nonReentrant
         whenNotPaused
     {
-        (address usdc, address transmitter) = _localUsdcAndTransmitter();
-        _execute(usdc, transmitter, message, attestation, feeRecipient == address(0) ? msg.sender : feeRecipient);
+        _execute(message, attestation, feeRecipient == address(0) ? msg.sender : feeRecipient);
     }
 
     /// @notice Relay many CCTP mints in one transaction, earning the sum of their `mintFee`s at
@@ -109,14 +120,13 @@ contract CctpExecutor is CallbackExecutor, Ownable {
         returns (bool[] memory filled)
     {
         if (messages.length != attestations.length) revert LengthMismatch();
-        (address usdc, address transmitter) = _localUsdcAndTransmitter();
         address feeEarner = feeRecipient == address(0) ? msg.sender : feeRecipient;
         filled = new bool[](messages.length);
         for (uint256 i; i < messages.length; ++i) {
             // try/catch needs an external call; the OnlySelf trampoline runs under the batch's single
             // nonReentrant guard. A reverting item rolls back fully (its nonce stays unconsumed) and is
             // skipped — successful siblings are unaffected.
-            try this._executeOne(usdc, transmitter, messages[i], attestations[i], feeEarner) {
+            try this._executeOne(messages[i], attestations[i], feeEarner) {
                 filled[i] = true;
             } catch {
                 emit BatchItemSkipped(i, keccak256(messages[i]));
@@ -126,40 +136,20 @@ contract CctpExecutor is CallbackExecutor, Ownable {
 
     /// @dev `OnlySelf` trampoline enabling `executeBatch`'s per-item `try`/`catch`. Not `nonReentrant`, so
     ///      the self-call passes the caller's guard — mirrors `CallbackExecutor._executeDelivery`.
-    function _executeOne(
-        address usdc,
-        address transmitter,
-        bytes calldata message,
-        bytes calldata attestation,
-        address feeRecipient
-    ) external {
+    function _executeOne(bytes calldata message, bytes calldata attestation, address feeRecipient) external {
         if (msg.sender != address(this)) revert OnlySelf();
-        _execute(usdc, transmitter, message, attestation, feeRecipient);
+        _execute(message, attestation, feeRecipient);
     }
 
     function setPaused(bool newPaused) external onlyOwner {
         paused = newPaused;
     }
 
-    /// @dev Resolve this chain's USDC + CCTP MessageTransmitter from the immutable registry (read once per
-    ///      call, and once per batch rather than per item).
-    function _localUsdcAndTransmitter() private view returns (address usdc, address transmitter) {
-        ChainConfig memory lc = config.chainConfig(block.chainid);
-        usdc = lc.usdc;
-        transmitter = ITokenMessengerV2(lc.cctpTokenMessenger).localMessageTransmitter();
-    }
-
     /// @dev Core relay: mint + authenticate via CCTP, pay `feeRecipient` the envelope's `mintFee`, then
     ///      forward the rest to the attested `target` (optionally running its `onCctpExecute` hook).
     ///      `target`/`refundTo` come from the source-attested envelope and are never caller-controlled;
     ///      only `feeRecipient` (where the relayer's own fee lands) is a caller choice.
-    function _execute(
-        address usdc,
-        address transmitter,
-        bytes calldata message,
-        bytes calldata attestation,
-        address feeRecipient
-    ) internal {
+    function _execute(bytes calldata message, bytes calldata attestation, address feeRecipient) internal {
         // Mint + authenticate. Reverts (and rolls back) on a bad attestation or a used nonce.
         if (!IMessageTransmitterV2(transmitter).receiveMessage(message, attestation)) revert ReceiveMessageFailed();
 
