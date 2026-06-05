@@ -63,8 +63,11 @@ abstract contract FastFillBase is IFastFill, CallbackExecutor, Ownable, Multical
     /// @notice Destination-chain record for each order, keyed by orderId.
     mapping(bytes32 orderId => OrderRecord) internal _orders;
 
-    /// @notice Per-adapter governance cap on the fee rate, WAD (<= 1e18).
-    uint256 public maxFeeRate;
+    /// @notice Per-adapter governance cap on the fee rate, WAD (<= 1e18, which fits in uint64). Declared
+    ///         as `uint64` so it packs into ONE slot with `_nonceCounter` + `paused` (8 + 8 + 1 bytes):
+    ///         on `fill`, `whenNotPaused` reads `paused` and warms the slot, so the pricing read of this
+    ///         is then warm instead of a separate cold SLOAD.
+    uint64 public maxFeeRate;
 
     /// @notice Monotonic counter assigning each source-side order a unique nonce.
     uint64 internal _nonceCounter;
@@ -78,7 +81,7 @@ abstract contract FastFillBase is IFastFill, CallbackExecutor, Ownable, Multical
     constructor(address owner_, uint256 maxFeeRate_) {
         if (maxFeeRate_ > PricingLib.WAD) revert InvalidMaxFeeRate(maxFeeRate_);
         _initializeOwner(owner_);
-        maxFeeRate = maxFeeRate_;
+        maxFeeRate = uint64(maxFeeRate_); // <= WAD (1e18) < uint64 max, checked above
     }
 
     modifier whenNotPaused() {
@@ -97,11 +100,6 @@ abstract contract FastFillBase is IFastFill, CallbackExecutor, Ownable, Multical
     ///      its ERC20 address. Reverts on mismatch. Used by both `fill` and `_settle`.
     function _resolveOutputToken(Order memory order) internal view virtual returns (address token);
 
-    /// @dev Revert unless `chainId` is a supported counterpart for this bridge (per the config
-    ///      registry). This is the "does the remote chain exist" check that replaces the old
-    ///      remote-adapter registry now that the counterpart is always `address(this)`.
-    function _requireSupportedRemote(uint32 chainId) internal view virtual;
-
     // ---------------------------------------------------------------------------------------------
     // Optimistic fill (destination, before the bridge message arrives)
     // ---------------------------------------------------------------------------------------------
@@ -110,14 +108,73 @@ abstract contract FastFillBase is IFastFill, CallbackExecutor, Ownable, Multical
     /// @dev `msg.sender` is the filler and the payer; it must have approved this adapter for the
     ///      payout (or batch a `selfPermit` via `multicall` for a single transaction).
     function fill(Order calldata order) external nonReentrant whenNotPaused returns (bytes32 orderId) {
+        return _fill(order, msg.sender, msg.sender);
+    }
+
+    /// @inheritdoc IFastFill
+    /// @dev `msg.sender` funds the payout, but `beneficiary` is recorded as the filler and is the one
+    ///      reimbursed at settlement (`address(0)` => `msg.sender`) — e.g. a hot wallet relays while a
+    ///      treasury collects the reimbursement. Only the relayer's OWN reimbursement is redirected; the
+    ///      user-signed `order.recipient` (who receives the payout now) is unaffected.
+    function fillTo(Order calldata order, address beneficiary)
+        external
+        nonReentrant
+        whenNotPaused
+        returns (bytes32 orderId)
+    {
+        return _fill(order, beneficiary == address(0) ? msg.sender : beneficiary, msg.sender);
+    }
+
+    /// @inheritdoc IFastFill
+    /// @dev Fill many in-flight orders in one transaction, all funded by `msg.sender` and recording
+    ///      `beneficiary` as the filler (`address(0)` => `msg.sender`). Each order is attempted
+    ///      independently: one that reverts (already filled, wrong chain/bridge, insufficient approval,
+    ///      ...) is SKIPPED — no funds move for it and it stays fillable — while the rest still fill.
+    ///      `filled[i]` reports per-order success. Unlike `multicall`, a single bad order does not abort
+    ///      the batch.
+    function fillBatch(Order[] calldata orders, address beneficiary)
+        external
+        nonReentrant
+        whenNotPaused
+        returns (bool[] memory filled)
+    {
+        address payer = msg.sender;
+        address filler = beneficiary == address(0) ? payer : beneficiary;
+        uint256 n = orders.length;
+        filled = new bool[](n);
+        for (uint256 i; i < n;) {
+            // try/catch needs an external call; the OnlySelf trampoline runs under the batch's single
+            // nonReentrant guard. A reverting order rolls back fully (its pull is undone) and is skipped.
+            try this._fillOne(orders[i], filler, payer) {
+                filled[i] = true;
+            } catch {
+                emit FillSkipped(i, orders[i].hash());
+            }
+            unchecked {
+                ++i; // bounded by `n` (array length); cannot overflow
+            }
+        }
+    }
+
+    /// @dev `OnlySelf` trampoline enabling `fillBatch`'s per-order `try`/`catch`. Not `nonReentrant`, so
+    ///      the self-call passes the caller's guard — mirrors `CallbackExecutor._executeDelivery`.
+    function _fillOne(Order calldata order, address filler, address payer) external {
+        if (msg.sender != address(this)) revert OnlySelf();
+        _fill(order, filler, payer);
+    }
+
+    /// @dev Shared fill body: record `filler` (reimbursed at settle), pull the payout from `payer` (which
+    ///      must have approved this adapter), then deliver it to the user-signed recipient. `filler` and
+    ///      `payer` may differ, but neither can redirect the payout away from `order.recipient`.
+    function _fill(Order calldata order, address filler, address payer) internal returns (bytes32 orderId) {
         address token;
         address recipient;
         uint256 payout;
         uint256 fee;
-        (orderId, token, recipient, payout, fee) = _prepareFill(order, msg.sender);
-        SafeTransferLib.safeTransferFrom(token, msg.sender, address(this), payout);
+        (orderId, token, recipient, payout, fee) = _prepareFill(order, filler);
+        SafeTransferLib.safeTransferFrom(token, payer, address(this), payout);
         _deliverOrderWithHook(orderId, token, recipient, payout, order.hookData, order.callbackGasLimit);
-        emit OrderFilled(orderId, msg.sender, payout, fee, uint40(block.timestamp));
+        emit OrderFilled(orderId, filler, payout, fee, uint40(block.timestamp));
     }
 
     /// @notice Fill `order` on behalf of `filler`, pulling the payout from `filler` via a Permit2
@@ -343,10 +400,10 @@ abstract contract FastFillBase is IFastFill, CallbackExecutor, Ownable, Multical
         _nonceCounter = nonce + 1;
     }
 
-    /// @dev Common create-time validation. Adapters add bridge-specific checks (token, domain/eid).
+    /// @dev Common create-time validation (local-only). The destination chain's support is checked by
+    ///      the adapter inline, from its single destination-config read in the initiate path.
     function _assertCreatable(Order memory order) internal view {
         if (order.srcChainId != block.chainid) revert NotSourceChain(order.srcChainId);
-        _requireSupportedRemote(order.dstChainId);
         if (order.expectedDeliveryTime <= order.startTime) {
             revert InvalidWindow(order.startTime, order.expectedDeliveryTime);
         }
@@ -395,7 +452,7 @@ abstract contract FastFillBase is IFastFill, CallbackExecutor, Ownable, Multical
 
     function setMaxFeeRate(uint256 newMaxFeeRate) external onlyOwner {
         if (newMaxFeeRate > PricingLib.WAD) revert InvalidMaxFeeRate(newMaxFeeRate);
-        maxFeeRate = newMaxFeeRate;
+        maxFeeRate = uint64(newMaxFeeRate); // <= WAD (1e18) < uint64 max, checked above
     }
 
     function setPaused(bool newPaused) external onlyOwner {

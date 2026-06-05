@@ -50,9 +50,9 @@ flowchart TB
     BASE --> OL
     BASE --> PL
     BASE --> AC
-    CA -- "reads at call time" --> CFG
-    CE -- "reads at call time" --> CFG
-    OA -- "reads at call time" --> CFG
+    CA -- "reads (ctor: locals; call: remote)" --> CFG
+    CE -- "reads (ctor: locals; call: remote)" --> CFG
+    OA -- "reads (ctor: locals; call: remote)" --> CFG
     CA --> BL
     CA --> EL
     CE --> BL
@@ -72,9 +72,9 @@ initiates outbound transfers *and* settles inbound ones, and is deployed on ever
 |---|---|
 | `CallbackExecutor` | Shared transfer+callback substrate: `_payout` fallback, `claim`/`claimable`, atomic transfer+hook execution, redirect parsing, return-data bounding, callback gas checks |
 | `FastFillBase` | Order book, status machine, `fill`/`fillFor`, `_settle`, fast-fill destination-execution callback (`onFastFill`), pricing call, pause, ownership, EIP-2612 `selfPermit` + Permit2 pulls + `Multicallable` |
-| `FastFillConfig` | Immutable CREATE2 chain registry — per-chain CCTP/LZ transport (`chainConfig`) plus each OFT's `(oft, token)` keyed by `(chainId, oftId)` (`oftConfig`); the single source the adapters read at call time |
+| `FastFillConfig` | Immutable CREATE2 chain registry — per-chain CCTP/LZ transport (`chainConfig`) plus each OFT's `(oft, token)` keyed by `(chainId, oftId)` (`oftConfig`); the single source the adapters read — LOCAL config once at construction (cached as immutables), REMOTE config per call |
 | `CctpAdapter` | `initiateCCTP`/`initiateCCTPFor` (burn-with-hook), direct `settle(message, attestation)`, routed `onCctpExecute(...)` from `CctpExecutor` |
-| `CctpExecutor` | Generic permissionless CCTP mint-relay: consumes executor-routed CCTP messages, pays `mintFee` to the caller, forwards USDC to a recipient or calls `onCctpExecute` on a receiver |
+| `CctpExecutor` | Generic permissionless CCTP mint-relay: consumes executor-routed CCTP messages (single `execute`/`executeTo` or partial-success `executeBatch`), pays `mintFee` to the caller or a caller-named recipient, forwards USDC to a recipient or calls `onCctpExecute` on a receiver |
 | `OftAdapter` | One per OFT (selected by `oftId`): `initiateOFT` (`send` with `composeMsg`) and `lzCompose` (LayerZero compose callback) |
 | `OftAdapterFactory` | `deploy(oftId)` — CREATE2-stamps an `OftAdapter` for an OFT at a deterministic, cross-chain-stable address (shared `config`/`owner`/`maxFeeRate` baked in) |
 | `OftId` | Stable numeric ids per OFT (USD₮0=0, USDe=1, sUSDe=2, ENA=3, USDtb=4) — append-only |
@@ -160,6 +160,13 @@ sequenceDiagram
     D->>R: reimburse outputAmount
     D->>C: pay surplus
 ```
+
+The relayer's entrypoints have batch and directed-payout variants: **`fillTo(order, beneficiary)`** funds
+the payout from `msg.sender` but records `beneficiary` as the filler reimbursed at settle, and
+**`fillBatch(orders[], beneficiary)`** fills many in-flight orders in one transaction with partial success
+(an order that reverts — already filled, wrong chain — is skipped, not aborting the batch; `filled[i]`
+reports each). Neither redirects the payout away from the user-signed `recipient` — they only direct the
+relayer's own reimbursement. (`CctpExecutor` has the analogous `executeTo` / `executeBatch` — §7.)
 
 ### 4b. No fill (worst case = same as the bridge alone)
 
@@ -323,9 +330,10 @@ knows nothing about fast-fill orders. Any CCTP integrator can use it as a permis
    - `mintRecipient = address(CctpExecutor)` encoded as bytes32.
    - `destinationCaller = address(CctpExecutor)` encoded as bytes32.
    - `hookData = ExecHookLib.encode(envelope)`.
-2. On the destination chain, anyone calls `CctpExecutor.execute(message, attestation)`.
-3. The executor mints USDC to itself via CCTP, pays `envelope.mintFee` to `msg.sender`, and routes the
-   rest according to the envelope.
+2. On the destination chain, anyone calls `CctpExecutor.execute(message, attestation)` (or `executeTo` /
+   `executeBatch` — see "Batched relay & directed fee" below).
+3. The executor mints USDC to itself via CCTP, pays `envelope.mintFee` to the relayer (or a caller-named
+   fee recipient), and routes the rest according to the envelope.
 
 The envelope is:
 
@@ -392,6 +400,26 @@ ExecHook({
 The adapter always sets `gasLimit > 0`, because the hook is what calls `onCctpExecute` and settles the
 order. A forward-only executor envelope is useful for standalone integrations, but would skip
 fast-fill settlement if used for an adapter order.
+
+### Batched relay & directed fee
+
+CCTP v2 has no on-chain batch mint — `receiveMessage` takes one message — so a relayer optimizes gas by
+batching the *calls*, not the mint. Two extra entrypoints support this:
+
+- **`executeTo(message, attestation, feeRecipient)`** — a single relay that pays the `mintFee` to a
+  caller-named `feeRecipient` (`address(0)` => `msg.sender`), e.g. a hot wallet relays while a treasury
+  collects the fee.
+- **`executeBatch(messages[], attestations[], feeRecipient)`** — relay many messages in one transaction
+  (amortizing the per-transaction base cost and reading the registry once), earning the sum of their
+  `mintFee`s. Each item runs in its own `try`/`catch` self-call under the batch's single `nonReentrant`
+  guard, so an item that reverts (already relayed, stale attestation, an under-funded hook, …) is
+  **skipped** — it rolls back fully (its CCTP nonce stays unconsumed, so it is retryable) while the rest
+  still execute. `filled[i]` reports per-item success and `BatchItemSkipped` is emitted for the others.
+  Unlike `multicall`, a single bad item never aborts the batch.
+
+Only the relayer's **own** `mintFee` is caller-directed; the delivery `target` and `refundTo` come from
+the source-attested envelope and are never caller-controlled, so no caller can redirect the bridged USDC.
+(`FastFillBase` has the symmetric `fillTo` / `fillBatch` — §4.)
 
 ---
 
@@ -489,11 +517,15 @@ but is strictly safer: because the transfer and the callback share one revertabl
 deterministically-failing hook can never strand the bridged funds — they always end delivered,
 redirected, or claimable. Hardening:
 
-- **Gas cap.** Creation rejects `callbackGasLimit > 5,000,000`. Delivery forwards exactly
-  `callbackGasLimit`; the adapter first requires enough gas remains (EIP-150 63/64) so a relayer
-  cannot starve the user's signed budget (else `fill`/`settle` reverts, forcing a retry). The limit is
-  signed — in the order and the Permit2 witness — so the relayer prices it into the base fee and a
-  sponsor cannot alter it.
+- **Gas cap & guaranteed budget.** Creation rejects `callbackGasLimit > 5,000,000`. The receiver call is
+  reached through two nested EIP-150 63/64 deductions (the delivery self-call, then the call to the
+  receiver), so an exact check immediately before that call requires `gasleft ≥ ceil(callbackGasLimit ·
+  64/63) + slack`, guaranteeing the receiver is forwarded its **full** signed budget. A relayer sets the
+  transaction's total gas but not this signed limit, and cannot land a fill while starving the callback:
+  under-funding reverts the whole `fill`/`settle` (forcing a retry) rather than committing with a starved
+  callback routed to the claim ledger. (A callback that exhausts its *full* budget still routes to
+  `claimable` — that is the user's own budget sizing, not a relayer lever.) The limit is signed — in the
+  order and the Permit2 witness — so the relayer prices it into the base fee and a sponsor cannot alter it.
 - **Return-bomb-safe.** The revert data is copied with a bounded length (enough for `RedirectFunds`),
   so a receiver cannot grief the relayer with a huge returndata payload.
 - **Reentrancy.** Delivery runs inside the existing `nonReentrant` fill/settle with effects written
@@ -557,11 +589,14 @@ speed / executor of a signed intent.
 | Routed CCTP nonce griefing | `mintFee > 0` messages set `destinationCaller = CctpExecutor`; only the executor can consume them, and it forwards authenticated CCTP fields to the adapter before settlement. |
 | Failed CCTP executor relayer payout | The `mintFee` push reverts the entire `execute`, rolling back the CCTP nonce so another relayer can retry. |
 | Failed CCTP executor hook | Atomic transfer+call rolls back and routes funds to `RedirectFunds(dest)` or `claimable[refundTo]`; `refundTo == executor` is rejected. |
+| Caller redirecting bridged funds via a flavour | `executeTo`/`executeBatch` (and `fillTo`/`fillBatch`) only redirect the relayer's OWN `mintFee`/reimbursement; the delivery `target` (attested envelope) and `recipient` (signed order) stay authoritative, so a caller cannot route the user's funds to itself. |
+| Batch item griefing siblings | Each `executeBatch`/`fillBatch` item runs in its own `try`/`catch` self-call under one `nonReentrant` guard; a reverting item rolls back fully (nonce unconsumed / no pull) and is skipped, never aborting the batch or touching successful items. |
 | Forged OFT compose | Three gates: endpoint, local OFT, `composeFrom == address(this)`. |
-| Misconfigured registry | Local domain/eid/token are read live from the bridge contracts and cross-checked against `FastFillConfig`; a mismatch reverts. |
+| Misconfigured registry | At construction, local domain/eid/token are read live from the bridge contracts and cross-checked against `FastFillConfig`, then cached as immutables; a mismatch reverts the deployment, so a wrong constant can never silently ship. |
 | Sponsor altering a signed intent | Permit2 witness binds the order intent / orderId **and the opted-into bridge mode** (`bridgeParams`); a tampered order — or a flipped fast/slow / executor option — recovers a different signer and reverts (both proven against real Permit2). |
 | Reentrancy | `nonReentrant` + checks-effects-interactions (status before transfers). |
 | Hostile destination receiver | The `onFastFill` callback is gas-capped, return-bomb-safe, runs behind `nonReentrant` in an atomic transfer+call frame; any failure routes to redirect/claimable — it can never brick the fill/settle, strand funds, or keep funds it wasn't owed. |
+| Relayer under-funding destination gas | An exact in-frame check requires `gasleft ≥ callbackGasLimit · 64/63 + slack` immediately before the receiver call (covering both nested EIP-150 63/64 deductions), so a committed fill always forwarded the callback its **full** signed budget; a relayer that under-funds the tx reverts the whole `fill`/`settle` (forcing a retry) instead of starving the callback into `claimable[recipient]`. The starvation revert is re-thrown unforgeably (its 68-byte error length is unreachable by a callback, whose revert data is capped at 36 bytes). |
 | Recipient/filler revert (e.g. USDC blacklist) | `_payout` falls back to the `claimable` ledger; settlement still completes. |
 | Surplus theft | Surplus is computed inside the authenticated settle and always routed to `order.recipient`; the filler is hard-capped at `outputAmount`. |
 | Underpaying the user on fill | `fill` computes `payout` on-chain and pulls exactly that from the relayer. |

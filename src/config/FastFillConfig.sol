@@ -20,8 +20,8 @@ import {OftId} from "../libraries/OftId.sol";
 ///         What is NOT baked is anything an adapter can read live on its own chain: the CCTP
 ///         MessageTransmitter (read from the TokenMessenger), the local CCTP domain (read from the
 ///         MessageTransmitter), and the OFT endpoint / token / eid (read from the OFT). Adapters
-///         cross-check those live reads against this registry, so a wrong constant here cannot
-///         silently ship — deployment/operation reverts on mismatch.
+///         cross-check those live reads against this registry AT CONSTRUCTION (then cache the locals as
+///         immutables), so a wrong constant here cannot silently ship — deployment reverts on mismatch.
 ///
 ///         Sources: Circle CCTP v2 (developers.circle.com/cctp), LayerZero v2 deployments, USD₮0
 ///         (github.com/Everdawn-Labs/usdt0-audit-reports), and Ethena (docs.ethena.fi /

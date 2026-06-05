@@ -50,6 +50,13 @@ For CCTP there are two settlement modes. `mintFee == 0` keeps the legacy direct 
 anyone calls `execute(message, attestation)`, earns `mintFee`, and the executor forwards the remaining
 USDC to the adapter, which settles via `onCctpExecute`. The shared `Order` and `orderId` are unchanged.
 
+**Batching & directed payout.** A relayer can bundle many mints into one transaction via
+`executeBatch(messages[], attestations[], feeRecipient)` (and fills via `fillBatch(orders[], beneficiary)`)
+with **partial success** — an item that reverts (already relayed/filled, stale attestation) is skipped,
+not aborting the batch — and can direct its own `mintFee`/reimbursement to a chosen address
+(`executeTo` / `fillTo`). These move only the relayer's own funds; the user-signed delivery target and
+recipient stay authoritative.
+
 **The load-bearing invariant.** `orderId = keccak256(abi.encode(order))` is computed identically at source-encode, at fill, and at settle. The order data settles through the bridge's *authenticated* channel, so a relayer that fills against a fabricated order computes an orderId no settling message will reproduce, and is simply never reimbursed. **Fills are trustless: a careless or malicious filler can only lose its own funds** — never the recipient's, the protocol's, or another filler's. That is why filling is permissionless by default.
 
 Each order moves through a one-slot status machine:
@@ -204,7 +211,7 @@ Initiate calls take `recipient` as `bytes32` for bridge compatibility, but it mu
 
 An order can carry **`hookData`** (and a user-signed **`callbackGasLimit`**, capped at **5,000,000 gas**): when the funds are delivered — whether by a relayer's optimistic fill or by the bridge settling — a recipient *contract* receives an [`IFastFillReceiver.onFastFill(orderId, token, amount, hookData)`](src/interfaces/IFastFillReceiver.sol) callback in the **same atomic frame** as the transfer. Empty `hookData` (or an EOA recipient) ⇒ funds delivered, no call. The same interface serves both adapters.
 
-The callback is **gas-capped** (`{gas: callbackGasLimit}`, return-bomb-safe, behind the existing `nonReentrant` guard — a receiver cannot re-enter or grief the fill), and **funds are never stuck**: the receiver's own revert data governs the fallback.
+The callback is **gas-capped** (`{gas: callbackGasLimit}`, return-bomb-safe, behind the existing `nonReentrant` guard — a receiver cannot re-enter or grief the fill). The forwarded budget is **guaranteed**: an exact in-frame check (covering both nested EIP-150 63/64 deductions) means a committed fill always delivered the receiver its full signed `callbackGasLimit` — a relayer that under-funds the transaction reverts the whole fill (forcing a retry) rather than starving the callback into the claim ledger. And **funds are never stuck**: the receiver's own revert data governs the fallback.
 
 ```
 onFastFill succeeds            → funds delivered, execution ran

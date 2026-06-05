@@ -27,11 +27,12 @@ import {IFastFillConfig, ChainConfig} from "../interfaces/IFastFillConfig.sol";
 ///           `mintFee`, forwards the rest here, and calls `onCctpExecute` — the routed analog of
 ///           `settle`. This gives permissionless, incentivized destination delivery without a keeper.
 ///
-///         All chain-specific data (TokenMessenger, USDC, CCTP domains) is resolved at call time from
-///         the immutable `config` registry keyed by `block.chainid`, so — given identical constructor
-///         args — this contract deploys to the same CREATE2 address on every chain. The counterpart
-///         adapter is therefore always `address(this)`: a burn carries `messageSender == address(this)`,
-///         which is the anti-forgery check enforced by both settlement paths.
+///         This chain's bridge addresses (USDC, the CCTP TokenMessenger + MessageTransmitter) are read
+///         from the immutable `config` registry ONCE at construction and cached as immutables; remote-
+///         chain data (the destination burn domain, the source-chain auth) still resolves per call.
+///         Because the locals are read from `config` (not constructor args), the init-code — and thus
+///         the CREATE2 address — is identical on every chain, so the counterpart adapter is always
+///         `address(this)`: a burn carries `messageSender == address(this)`, the anti-forgery check.
 contract CctpAdapter is FastFillBase, ICctpExecReceiver {
     using OrderLib for Order;
     using AddressCast for bytes32;
@@ -43,6 +44,16 @@ contract CctpAdapter is FastFillBase, ICctpExecReceiver {
     /// @notice The canonical `CctpExecutor` (same CREATE2 address on every chain). Routed orders
     ///         (`mintFee > 0`) name it as `mintRecipient`/`destinationCaller`; it calls `onCctpExecute`.
     address public immutable cctpExecutor;
+
+    /// @notice This chain's CCTP locals, resolved from the registry ONCE at construction and cached, so
+    ///         the hot paths (`fill`/`settle`) don't pay a cold registry view call (and a TokenMessenger
+    ///         call) each time. The registry is immutable and this adapter is pinned to one chain at
+    ///         deploy; reading them in the constructor (not from args) keeps the CREATE2 init-code — and
+    ///         thus the deterministic address — identical across chains. REMOTE-chain config (the dst
+    ///         burn domain, src-chain auth) still resolves dynamically from `config`, as it varies per order.
+    address public immutable usdc; // local USDC (the CCTP burn/mint token)
+    address public immutable cctpTokenMessenger; // local CCTP v2 TokenMessenger
+    address public immutable cctpTransmitter; // local CCTP v2 MessageTransmitter (derived from the messenger)
 
     /// @notice CCTP v2 `minFinalityThreshold` presets the user picks to opt into a bridging speed.
     ///         `<= FINALITY_FAST` makes the burn eligible for a fast (soft-finality) transfer, which
@@ -72,8 +83,20 @@ contract CctpAdapter is FastFillBase, ICctpExecReceiver {
         FastFillBase(owner_, maxFeeRate_)
     {
         if (cctpExecutor_ == address(0)) revert ZeroCctpExecutor();
-        config = IFastFillConfig(config_);
+        IFastFillConfig cfg = IFastFillConfig(config_);
+        config = cfg;
         cctpExecutor = cctpExecutor_;
+
+        // Resolve + cache this chain's CCTP locals once, and cross-check the registry's domain against
+        // the live MessageTransmitter — a wrong constant now reverts at DEPLOY, not on first use.
+        ChainConfig memory lc = cfg.chainConfig(block.chainid);
+        if (lc.usdc == address(0)) revert UnsupportedChain(uint32(block.chainid));
+        address transmitter = ITokenMessengerV2(lc.cctpTokenMessenger).localMessageTransmitter();
+        uint32 onchainDomain = IMessageTransmitterV2(transmitter).localDomain();
+        if (onchainDomain != lc.cctpDomain) revert DomainMismatch(lc.cctpDomain, onchainDomain);
+        usdc = lc.usdc;
+        cctpTokenMessenger = lc.cctpTokenMessenger;
+        cctpTransmitter = transmitter;
     }
 
     function _bridgeType() internal pure override returns (uint8) {
@@ -81,14 +104,8 @@ contract CctpAdapter is FastFillBase, ICctpExecReceiver {
     }
 
     function _resolveOutputToken(Order memory order) internal view override returns (address) {
-        address local = config.chainConfig(block.chainid).usdc;
-        if (order.outputToken != local.toBytes32()) revert WrongOutputToken(order.outputToken);
-        return local;
-    }
-
-    function _requireSupportedRemote(uint32 chainId) internal view override {
-        ChainConfig memory c = config.chainConfig(chainId);
-        if (!c.supported || c.usdc == address(0)) revert UnsupportedChain(chainId);
+        if (order.outputToken != usdc.toBytes32()) revert WrongOutputToken(order.outputToken);
+        return usdc;
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -127,6 +144,8 @@ contract CctpAdapter is FastFillBase, ICctpExecReceiver {
         if (maxFee >= inputAmount) revert MaxFeeTooHigh(maxFee, inputAmount);
         if (mintFee >= inputAmount - maxFee) revert MintFeeTooHigh(mintFee, inputAmount - maxFee);
         nonce = _nextNonce();
+        ChainConfig memory dc = config.chainConfig(dstChainId); // single destination-config read
+        if (!dc.supported || dc.usdc == address(0)) revert UnsupportedChain(dstChainId);
         Order memory order = _buildOrder(
             msg.sender,
             dstChainId,
@@ -137,13 +156,14 @@ contract CctpAdapter is FastFillBase, ICctpExecReceiver {
             deliveryWindow,
             discountRate,
             baseFee,
-            nonce
+            nonce,
+            dc.usdc
         );
         order.callbackGasLimit = exec.gasLimit;
         order.hookData = exec.data;
         _assertCreatable(order);
-        SafeTransferLib.safeTransferFrom(config.chainConfig(block.chainid).usdc, msg.sender, address(this), inputAmount);
-        orderId = _finishInitiate(order, maxFee, mintFee, minFinalityThreshold);
+        SafeTransferLib.safeTransferFrom(usdc, msg.sender, address(this), inputAmount);
+        orderId = _finishInitiate(order, maxFee, mintFee, minFinalityThreshold, dc.cctpDomain);
     }
 
     /// @notice Sponsored initiate: a third party submits, but the USDC is pulled from `from` against
@@ -170,24 +190,39 @@ contract CctpAdapter is FastFillBase, ICctpExecReceiver {
         if (maxFee >= inputAmount) revert MaxFeeTooHigh(maxFee, inputAmount);
         if (mintFee >= inputAmount - maxFee) revert MintFeeTooHigh(mintFee, inputAmount - maxFee);
         nonce = _nextNonce();
+        ChainConfig memory dc = config.chainConfig(dstChainId); // single destination-config read
+        if (!dc.supported || dc.usdc == address(0)) revert UnsupportedChain(dstChainId);
         Order memory order = _buildOrder(
-            from, dstChainId, recipient, inputAmount, maxFee, mintFee, deliveryWindow, discountRate, baseFee, nonce
+            from,
+            dstChainId,
+            recipient,
+            inputAmount,
+            maxFee,
+            mintFee,
+            deliveryWindow,
+            discountRate,
+            baseFee,
+            nonce,
+            dc.usdc
         );
         order.callbackGasLimit = exec.gasLimit;
         order.hookData = exec.data;
         _assertCreatable(order);
         // Pull AFTER building so the witness binds the order (incl. hookData + gas); bind the bridge mode too.
         _pullOrderViaPermit2(order, from, permit, keccak256(abi.encode(maxFee, minFinalityThreshold, mintFee)));
-        orderId = _finishInitiate(order, maxFee, mintFee, minFinalityThreshold);
+        orderId = _finishInitiate(order, maxFee, mintFee, minFinalityThreshold, dc.cctpDomain);
     }
 
     /// @dev Hash, burn, and emit, once the order is built and the USDC is held by this adapter.
-    function _finishInitiate(Order memory order, uint256 maxFee, uint256 mintFee, uint32 minFinalityThreshold)
-        private
-        returns (bytes32 orderId)
-    {
+    function _finishInitiate(
+        Order memory order,
+        uint256 maxFee,
+        uint256 mintFee,
+        uint32 minFinalityThreshold,
+        uint32 dstDomain
+    ) private returns (bytes32 orderId) {
         orderId = order.hash();
-        _dispatchBurn(order, maxFee, mintFee, minFinalityThreshold);
+        _dispatchBurn(order, maxFee, mintFee, minFinalityThreshold, dstDomain);
         emit OrderCreated(
             orderId,
             OrderLib.BRIDGE_CCTP,
@@ -214,20 +249,17 @@ contract CctpAdapter is FastFillBase, ICctpExecReceiver {
         uint64 deliveryWindow,
         uint256 discountRate,
         uint256 baseFee,
-        uint64 nonce
+        uint64 nonce,
+        address dstUsdc
     ) private view returns (Order memory order) {
-        address inUsdc = config.chainConfig(block.chainid).usdc;
-        address outUsdc = config.chainConfig(dstChainId).usdc;
-        if (inUsdc == address(0)) revert UnsupportedChain(uint32(block.chainid));
-        if (outUsdc == address(0)) revert UnsupportedChain(dstChainId);
         order = Order({
             bridgeType: OrderLib.BRIDGE_CCTP,
             srcChainId: uint32(block.chainid),
             dstChainId: dstChainId,
             sender: from.toBytes32(),
             recipient: recipient,
-            inputToken: inUsdc.toBytes32(),
-            outputToken: outUsdc.toBytes32(),
+            inputToken: usdc.toBytes32(), // local USDC, cached at construction
+            outputToken: dstUsdc.toBytes32(), // destination USDC, from the single dst-config read
             inputAmount: inputAmount,
             outputAmount: inputAmount - maxFee - mintFee,
             nonce: nonce,
@@ -242,17 +274,19 @@ contract CctpAdapter is FastFillBase, ICctpExecReceiver {
 
     /// @dev Approve the TokenMessenger and burn-with-hook. `mintFee == 0` targets this adapter directly
     ///      (legacy `settle` path); `mintFee > 0` targets the CctpExecutor with an `ExecHook` envelope.
-    function _dispatchBurn(Order memory order, uint256 maxFee, uint256 mintFee, uint32 minFinalityThreshold) private {
-        ChainConfig memory lc = config.chainConfig(block.chainid);
-        _assertLocalDomain(lc.cctpTokenMessenger, lc.cctpDomain);
-        uint32 dstDomain = config.chainConfig(order.dstChainId).cctpDomain;
-
+    function _dispatchBurn(
+        Order memory order,
+        uint256 maxFee,
+        uint256 mintFee,
+        uint32 minFinalityThreshold,
+        uint32 dstDomain
+    ) private {
         if (mintFee == 0) {
             // Direct path: this adapter is mintRecipient + destinationCaller; `settle` consumes the
             // message and runs `_settle` atomically.
             _burn(
-                lc.cctpTokenMessenger,
-                lc.usdc,
+                cctpTokenMessenger,
+                usdc,
                 order.inputAmount,
                 dstDomain,
                 address(this).toBytes32(),
@@ -277,8 +311,8 @@ contract CctpAdapter is FastFillBase, ICctpExecReceiver {
                 payload: OrderLib.encode(order)
             });
             _burn(
-                lc.cctpTokenMessenger,
-                lc.usdc,
+                cctpTokenMessenger,
+                usdc,
                 order.inputAmount,
                 dstDomain,
                 cctpExecutor.toBytes32(),
@@ -289,18 +323,11 @@ contract CctpAdapter is FastFillBase, ICctpExecReceiver {
         }
     }
 
-    /// @dev "No room to screw up": the registry's local domain must match the live MessageTransmitter.
-    function _assertLocalDomain(address messenger, uint32 expected) private view {
-        address transmitter = ITokenMessengerV2(messenger).localMessageTransmitter();
-        uint32 onchain = IMessageTransmitterV2(transmitter).localDomain();
-        if (onchain != expected) revert DomainMismatch(expected, onchain);
-    }
-
     /// @dev The burn itself, in its own frame to keep the stack shallow. `target` is used for BOTH
     ///      `mintRecipient` and `destinationCaller` on the dst chain (this adapter, or the executor).
     function _burn(
         address messenger,
-        address usdc,
+        address token,
         uint256 amount,
         uint32 dstDomain,
         bytes32 target,
@@ -308,9 +335,9 @@ contract CctpAdapter is FastFillBase, ICctpExecReceiver {
         uint32 minFinalityThreshold,
         bytes memory hookData
     ) private {
-        SafeTransferLib.safeApproveWithRetry(usdc, messenger, amount);
+        SafeTransferLib.safeApproveWithRetry(token, messenger, amount);
         ITokenMessengerV2(messenger)
-            .depositForBurnWithHook(amount, dstDomain, target, usdc, target, maxFee, minFinalityThreshold, hookData);
+            .depositForBurnWithHook(amount, dstDomain, target, token, target, maxFee, minFinalityThreshold, hookData);
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -321,11 +348,11 @@ contract CctpAdapter is FastFillBase, ICctpExecReceiver {
     ///         enforces that this contract is the `destinationCaller`, so the mint and settlement are
     ///         atomic. (Routed `mintFee > 0` transfers arrive via `onCctpExecute` instead.)
     function settle(bytes calldata message, bytes calldata attestation) external nonReentrant whenNotPaused {
-        address messenger = config.chainConfig(block.chainid).cctpTokenMessenger;
-        address transmitter = ITokenMessengerV2(messenger).localMessageTransmitter();
-
-        // Mint + authenticate. Reverts (and rolls back) on a bad attestation or a used nonce.
-        if (!IMessageTransmitterV2(transmitter).receiveMessage(message, attestation)) revert ReceiveMessageFailed();
+        // Mint + authenticate. Reverts (and rolls back) on a bad attestation or a used nonce. The
+        // MessageTransmitter was resolved + cross-checked once at construction.
+        if (!IMessageTransmitterV2(cctpTransmitter).receiveMessage(message, attestation)) {
+            revert ReceiveMessageFailed();
+        }
 
         (
             uint32 sourceDomain,
@@ -353,13 +380,13 @@ contract CctpAdapter is FastFillBase, ICctpExecReceiver {
     ///      sent us the USDC; a revert here would make the executor re-route the funds to the envelope's
     ///      `refundTo` and strand an optimistic filler. Settlement of an already-bridged routed order
     ///      must always complete. Pausing still blocks new initiates/fills and the direct `settle`.
-    function onCctpExecute(uint32 sourceDomain, bytes32 sender, address usdc, uint256 amount, bytes calldata payload)
+    function onCctpExecute(uint32 sourceDomain, bytes32 sender, address token, uint256 amount, bytes calldata payload)
         external
         override
         nonReentrant
     {
         if (msg.sender != cctpExecutor) revert UntrustedExecutor(msg.sender);
-        if (usdc != config.chainConfig(block.chainid).usdc) revert WrongOutputToken(usdc.toBytes32());
+        if (token != usdc) revert WrongOutputToken(token.toBytes32());
         Order memory order = OrderLib.decode(payload);
         _authenticateOrder(sourceDomain, sender, order);
         _settle(order, order.hash(), amount);

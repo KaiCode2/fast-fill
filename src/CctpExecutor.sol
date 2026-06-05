@@ -35,6 +35,15 @@ contract CctpExecutor is CallbackExecutor, Ownable {
     /// @notice The immutable chain registry. Same address on every chain (CREATE2).
     IFastFillConfig public immutable config;
 
+    /// @notice This chain's USDC and CCTP MessageTransmitter, resolved from the registry ONCE at
+    ///         construction and cached. Every relay would otherwise pay a cold external view call to the
+    ///         registry (plus a call into the TokenMessenger) just to learn them. Safe as immutables:
+    ///         the registry is immutable and this contract is pinned to one chain at deploy. Reading them
+    ///         from the registry in the constructor (rather than via constructor args) keeps the CREATE2
+    ///         init-code identical across chains, so the deterministic address is unchanged.
+    address public immutable usdc;
+    address public immutable transmitter;
+
     /// @notice When true, `execute` is blocked (claim is never blocked). In-flight messages can always
     ///         be self-redeemed once unpaused; the CCTP message stays valid until consumed.
     bool public paused;
@@ -45,20 +54,32 @@ contract CctpExecutor is CallbackExecutor, Ownable {
     error MintFeeExceedsMinted(uint256 mintFee, uint256 minted);
     error InvalidRefundTo(address refundTo);
     error HookGasLimitTooHigh(uint64 gasLimit, uint64 maxGasLimit);
+    error LengthMismatch();
 
     /// @notice A CCTP message was relayed and its envelope executed.
     /// @param id        keccak256(message) — a unique id for the relayed message.
-    /// @param relayer   `msg.sender`, who earned `mintFee`.
+    /// @param feeEarner The address paid `mintFee` (the caller-chosen fee recipient; default the caller).
     /// @param target    The envelope target (forward recipient or receiver contract).
-    /// @param mintFee   USDC paid to the relayer.
+    /// @param mintFee   USDC paid to `feeEarner`.
     /// @param forwarded USDC forwarded to `target` (minted minus mintFee).
     event Executed(
-        bytes32 indexed id, address indexed relayer, address indexed target, uint256 mintFee, uint256 forwarded
+        bytes32 indexed id, address indexed feeEarner, address indexed target, uint256 mintFee, uint256 forwarded
     );
+
+    /// @notice A batch item was skipped because it reverted (already relayed, stale attestation, an
+    ///         under-funded hook, ...). Its CCTP nonce stays unconsumed, so the item is independently
+    ///         retryable; the rest of the batch still executed.
+    /// @param index The item's position in the batch.
+    /// @param id    keccak256(message) for the skipped item.
+    event BatchItemSkipped(uint256 indexed index, bytes32 indexed id);
 
     constructor(address config_, address owner_) {
         _initializeOwner(owner_);
-        config = IFastFillConfig(config_);
+        IFastFillConfig cfg = IFastFillConfig(config_);
+        config = cfg;
+        ChainConfig memory lc = cfg.chainConfig(block.chainid);
+        usdc = lc.usdc;
+        transmitter = ITokenMessengerV2(lc.cctpTokenMessenger).localMessageTransmitter();
     }
 
     modifier whenNotPaused() {
@@ -72,9 +93,67 @@ contract CctpExecutor is CallbackExecutor, Ownable {
     ///         only consumption path. If no relayer finds the `mintFee` worthwhile, the burner (or
     ///         anyone) can self-redeem by calling this and paying the fee to themselves (net zero).
     function execute(bytes calldata message, bytes calldata attestation) external nonReentrant whenNotPaused {
-        ChainConfig memory lc = config.chainConfig(block.chainid);
-        address transmitter = ITokenMessengerV2(lc.cctpTokenMessenger).localMessageTransmitter();
+        _execute(message, attestation, msg.sender);
+    }
 
+    /// @notice Like `execute`, but the caller directs the `mintFee` to `feeRecipient` (e.g. a hot wallet
+    ///         relays while the fee accrues to a treasury). `address(0)` => `msg.sender`. This only moves
+    ///         the relayer's OWN earned fee; the user-signed delivery `target`/`refundTo` come from the
+    ///         attested envelope and are never caller-controlled.
+    function executeTo(bytes calldata message, bytes calldata attestation, address feeRecipient)
+        external
+        nonReentrant
+        whenNotPaused
+    {
+        _execute(message, attestation, feeRecipient == address(0) ? msg.sender : feeRecipient);
+    }
+
+    /// @notice Relay many CCTP mints in one transaction, earning the sum of their `mintFee`s at
+    ///         `feeRecipient` (`address(0)` => `msg.sender`). Each item is attempted independently: one
+    ///         that reverts (already relayed, stale attestation, an under-funded hook, ...) is SKIPPED —
+    ///         its CCTP nonce stays unconsumed and it is retryable — while the rest still execute.
+    ///         `filled[i]` reports per-item success. Reverts only on a length mismatch (a caller error).
+    function executeBatch(bytes[] calldata messages, bytes[] calldata attestations, address feeRecipient)
+        external
+        nonReentrant
+        whenNotPaused
+        returns (bool[] memory filled)
+    {
+        uint256 n = messages.length;
+        if (n != attestations.length) revert LengthMismatch();
+        address feeEarner = feeRecipient == address(0) ? msg.sender : feeRecipient;
+        filled = new bool[](n);
+        for (uint256 i; i < n;) {
+            // try/catch needs an external call; the OnlySelf trampoline runs under the batch's single
+            // nonReentrant guard. A reverting item rolls back fully (its nonce stays unconsumed) and is
+            // skipped — successful siblings are unaffected.
+            try this._executeOne(messages[i], attestations[i], feeEarner) {
+                filled[i] = true;
+            } catch {
+                emit BatchItemSkipped(i, keccak256(messages[i]));
+            }
+            unchecked {
+                ++i; // bounded by `n` (array length); cannot overflow
+            }
+        }
+    }
+
+    /// @dev `OnlySelf` trampoline enabling `executeBatch`'s per-item `try`/`catch`. Not `nonReentrant`, so
+    ///      the self-call passes the caller's guard — mirrors `CallbackExecutor._executeDelivery`.
+    function _executeOne(bytes calldata message, bytes calldata attestation, address feeRecipient) external {
+        if (msg.sender != address(this)) revert OnlySelf();
+        _execute(message, attestation, feeRecipient);
+    }
+
+    function setPaused(bool newPaused) external onlyOwner {
+        paused = newPaused;
+    }
+
+    /// @dev Core relay: mint + authenticate via CCTP, pay `feeRecipient` the envelope's `mintFee`, then
+    ///      forward the rest to the attested `target` (optionally running its `onCctpExecute` hook).
+    ///      `target`/`refundTo` come from the source-attested envelope and are never caller-controlled;
+    ///      only `feeRecipient` (where the relayer's own fee lands) is a caller choice.
+    function _execute(bytes calldata message, bytes calldata attestation, address feeRecipient) internal {
         // Mint + authenticate. Reverts (and rolls back) on a bad attestation or a used nonce.
         if (!IMessageTransmitterV2(transmitter).receiveMessage(message, attestation)) revert ReceiveMessageFailed();
 
@@ -95,12 +174,11 @@ contract CctpExecutor is CallbackExecutor, Ownable {
         if (h.mintFee > minted) revert MintFeeExceedsMinted(h.mintFee, minted);
         if (h.gasLimit > MAX_CALLBACK_GAS_LIMIT) revert HookGasLimitTooHigh(h.gasLimit, MAX_CALLBACK_GAS_LIMIT);
 
-        address usdc = lc.usdc;
         bytes32 id = keccak256(message);
 
-        // Pay the relayer first. If the push fails (e.g. blacklisted relayer), revert the whole relay:
-        // the CCTP nonce stays unconsumed and another relayer can retry.
-        if (h.mintFee != 0) SafeTransferLib.safeTransfer(usdc, msg.sender, h.mintFee);
+        // Pay the fee recipient first. If the push fails (e.g. blacklisted), revert the whole relay: the
+        // CCTP nonce stays unconsumed and another relayer can retry.
+        if (h.mintFee != 0) SafeTransferLib.safeTransfer(usdc, feeRecipient, h.mintFee);
 
         uint256 forwarded = minted - h.mintFee;
         address target = h.target.toAddress();
@@ -116,10 +194,6 @@ contract CctpExecutor is CallbackExecutor, Ownable {
 
         _deliverWithHook(id, usdc, target, forwarded, callbackData, h.gasLimit, refundTo);
 
-        emit Executed(id, msg.sender, target, h.mintFee, forwarded);
-    }
-
-    function setPaused(bool newPaused) external onlyOwner {
-        paused = newPaused;
+        emit Executed(id, feeRecipient, target, h.mintFee, forwarded);
     }
 }

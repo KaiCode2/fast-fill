@@ -23,11 +23,30 @@ import {TransientReentrancyGuard} from "./utils/TransientReentrancyGuard.sol";
 ///         and return-bomb-safe.
 abstract contract CallbackExecutor is ICallbackExecutor, TransientReentrancyGuard {
     /// @notice Maximum gas an order may request for destination execution (a create-time bound used by
-    ///         fast-fill adapters; the delivery path itself only enforces the 63/64 forwarding check).
+    ///         fast-fill adapters).
     uint64 public constant MAX_CALLBACK_GAS_LIMIT = 5_000_000;
 
     /// @dev `RedirectFunds(address)` revert data: selector (4 bytes) + encoded address (32 bytes).
     uint16 private constant CALLBACK_RETURNDATA_LIMIT = 0x24;
+
+    /// @dev ABI-encoded length of `InsufficientCallbackGas(uint256,uint256)` revert data: selector (4) +
+    ///      two words (64) = 68. Strictly greater than `CALLBACK_RETURNDATA_LIMIT`, so a callback whose
+    ///      bubbled revert is capped at 36 bytes can never forge this — see the catch in `_deliverWithHook`.
+    uint256 private constant INSUFFICIENT_GAS_REVERT_LEN = 0x44;
+
+    /// @dev Headroom reserved (on top of the callback budget) before the delivery self-call so the ERC20
+    ///      transfer cannot run out of gas and the in-frame budget guard in `_executeDelivery` is always
+    ///      reached. A conservative upper bound on the most expensive supported-token transfer scaled for
+    ///      the two nested EIP-150 63/64 deductions; validated against real transfer costs by the fork
+    ///      gas tests. The exact "callback got its full budget" guarantee is the in-frame guard, not this.
+    uint256 private constant TRANSFER_HEADROOM = 120_000;
+
+    /// @dev Slack added to the in-frame budget guard to cover the `LibCall.tryCall` setup (the calldata→
+    ///      memory copy of `callbackData` + CALL base cost) and the bounded-returndata epilogue, so that
+    ///      passing the guard means the callback receives its FULL signed budget after the final 63/64
+    ///      deduction. Fails closed (reverts the whole fill) if exceeded — never a silent route to the
+    ///      claim ledger.
+    uint256 private constant INNER_CALLBACK_BUFFER = 10_000;
 
     error NothingToClaim();
     error InsufficientCallbackGas(uint256 available, uint256 callbackGasLimit);
@@ -97,14 +116,38 @@ abstract contract CallbackExecutor is ICallbackExecutor, TransientReentrancyGuar
             _payout(id, token, recipient, amount);
             return;
         }
-        // Ensure the relayer forwards the signed gas budget (EIP-150 63/64 across the self-call and the
-        // callback, plus the ERC20 transfer); otherwise force a retry instead of letting an under-funded
-        // call silently route to the claim ledger.
-        if (gasleft() < gasLimit + gasLimit / 32 + 50_000) revert InsufficientCallbackGas(gasleft(), gasLimit);
+        // Fast-fail guard: reserve enough gas that the delivery self-call can run the ERC20 transfer and
+        // reach the in-frame budget guard inside `_executeDelivery`. `gasLimit/31` (> gasLimit*((64/63)^2-1))
+        // covers the two nested EIP-150 63/64 deductions; `TRANSFER_HEADROOM` covers the transfer itself.
+        // Under-funding here reverts the whole fill (forcing a retry) instead of silently routing to the
+        // claim ledger; the exact "callback received its full budget" guarantee is the guard in
+        // `_executeDelivery`, which fails closed even if `TRANSFER_HEADROOM` under-estimates the transfer.
+        if (gasleft() < gasLimit + gasLimit / 31 + TRANSFER_HEADROOM) {
+            revert InsufficientCallbackGas(gasleft(), gasLimit);
+        }
 
         try this._executeDelivery(token, recipient, amount, gasLimit, callbackData) {
             emit DestinationCallback(id, recipient, CallbackResult.Executed);
         } catch (bytes memory reason) {
+            // The in-frame budget guard tripped: the relayer under-funded destination gas, so the callback
+            // would not have received its full signed budget. Abort the whole fill (force a retry) instead
+            // of crediting the fallback claim ledger. The guard reverts with the full
+            // `InsufficientCallbackGas(uint256,uint256)` (68 bytes); a callback's bubbled revert is capped
+            // at `CALLBACK_RETURNDATA_LIMIT` (36 bytes) by `_executeDelivery`, so it can never forge this —
+            // the length check is the guarantee, the selector is a discriminator.
+            if (reason.length == INSUFFICIENT_GAS_REVERT_LEN) {
+                bytes32 selWord;
+                /// @solidity memory-safe-assembly
+                assembly {
+                    selWord := mload(add(reason, 0x20))
+                }
+                if (bytes4(selWord) == InsufficientCallbackGas.selector) {
+                    /// @solidity memory-safe-assembly
+                    assembly {
+                        revert(add(reason, 0x20), mload(reason))
+                    }
+                }
+            }
             address dest = _parseRedirect(reason);
             if (dest != address(0) && dest != address(this)) {
                 _payout(id, token, dest, amount);
@@ -130,6 +173,15 @@ abstract contract CallbackExecutor is ICallbackExecutor, TransientReentrancyGuar
     ) external {
         if (msg.sender != address(this)) revert OnlySelf();
         SafeTransferLib.safeTransfer(token, recipient, amount);
+        // Exact budget guarantee: after the transfer only the final this->recipient CALL remains, so a
+        // single EIP-150 63/64 deduction applies. Require gasleft >= ceil(gasLimit*64/63) + slack so the
+        // CALL forwards the FULL signed `gasLimit`; otherwise the relayer under-funded the tx — revert
+        // (caught and re-thrown by `_deliverWithHook`) rather than letting an under-funded callback OOG
+        // and route to the claim ledger. `gasLimit*64/63 == gasLimit + ceil(gasLimit/63)`; `+ 1` lifts the
+        // floored division to the ceiling.
+        if (gasleft() < gasLimit + gasLimit / 63 + 1 + INNER_CALLBACK_BUFFER) {
+            revert InsufficientCallbackGas(gasleft(), gasLimit);
+        }
         (bool ok,, bytes memory ret) = LibCall.tryCall(recipient, 0, gasLimit, CALLBACK_RETURNDATA_LIMIT, callbackData);
         if (!ok) LibCall.bubbleUpRevert(ret);
     }
