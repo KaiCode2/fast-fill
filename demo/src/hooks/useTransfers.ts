@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { Hex } from "viem";
 import type { SubmitMode } from "@/lib/api";
 import type { SupportedChainId, TokenSymbol } from "@/lib/chains";
+import type { HookKind } from "@/lib/hooks";
 
 /** A transfer the user started, persisted client-side so history survives reloads. */
 export interface TransferRecord {
@@ -15,9 +16,11 @@ export interface TransferRecord {
   dstChainId: SupportedChainId;
   amount: string; // base units
   outputAmount: string;
-  recipient: Hex; // address
+  recipient: Hex; // beneficiary address (with a hook, the on-chain recipient is the hook contract)
   srcTxHash?: Hex;
   forwarding: boolean;
+  hookKind?: HookKind; // destination action attached to this transfer
+  swapTokenSymbol?: string; // for "uniswap": the token swapped into
   createdAt: number;
 }
 

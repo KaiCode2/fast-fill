@@ -13,18 +13,30 @@ import {
   suggestMaxFee,
   type BridgeParams,
 } from "@/lib/bridge";
-import { REGISTRY, SUPPORTED_CHAIN_IDS, type SupportedChainId, type TokenSymbol } from "@/lib/chains";
+import { REGISTRY, SUPPORTED_CHAIN_IDS, tokenInfo, type SupportedChainId, type TokenSymbol } from "@/lib/chains";
 import { cctpMintFeeUsd, contractsConfigured, maxUsdPerTransfer } from "@/lib/config";
 import { fmtAmount } from "@/lib/format";
 import { DEFAULT_MAX_FEE_RATE, linearDiscountRate } from "@/lib/pricing";
 import { bridgeTypeForToken, chainsForToken, destinationsFor, getToken, isRouteSupported } from "@/lib/tokens";
 import { BRIDGE_CCTP } from "@/lib/order";
+import {
+  encodeAaveHookData,
+  encodeUniswapHookData,
+  hookAddress,
+  HOOK_CALLBACK_GAS,
+  HOOK_LABEL,
+  type HookKind,
+} from "@/lib/hooks";
+import { resolveToken, resolveTokenAsync, type TokenMeta } from "@/lib/tokenRegistry";
+import { DEFAULT_SLIPPAGE_BPS } from "@/lib/uniswap";
 import { useBalances } from "@/hooks/useBalances";
 import { useInitiate } from "@/hooks/useInitiate";
 import { useOftFee } from "@/hooks/useOftFee";
+import { useSwapQuote } from "@/hooks/useSwapQuote";
 import type { TransferRecord } from "@/hooks/useTransfers";
 import { FeePreview } from "./FeePreview";
 import { InfoTip } from "./InfoTip";
+import { TokenCombobox } from "./TokenCombobox";
 
 /** hookData must be a 0x-prefixed, whole-byte hex string ("0x" = deliver funds only, no hook). */
 const HEX_RE = /^0x([0-9a-fA-F]{2})*$/;
@@ -66,6 +78,13 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
   const [hookDataStr, setHookDataStr] = useState("0x"); // destination-execution payload ("0x" = none)
   const [gasLimitStr, setGasLimitStr] = useState(""); // callback gas for the recipient's onFastFill hook
 
+  // Destination action (optional hook). "none" = plain delivery; presets auto-fill recipient/hookData/gas.
+  const [hookKind, setHookKind] = useState<HookKind>("none");
+  const [tokenOutQuery, setTokenOutQuery] = useState(""); // swap target: symbol or 0x address
+  const [tokenOut, setTokenOut] = useState<TokenMeta | null>(null); // resolved swap target
+  const [tokenOutResolving, setTokenOutResolving] = useState(false);
+  const [slippageBps, setSlippageBps] = useState<number>(DEFAULT_SLIPPAGE_BPS);
+
   const bridgeType = bridgeTypeForToken(token);
   const decimals = getToken(src, token).decimals;
 
@@ -91,11 +110,42 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [src]);
 
+  // Resolve the swap target (symbol or address) against the destination chain. Symbols/known addresses
+  // resolve synchronously; an unlisted address is read on-chain (debounced). Cleared when not swapping.
+  useEffect(() => {
+    if (hookKind !== "uniswap") {
+      setTokenOut(null);
+      setTokenOutResolving(false);
+      return;
+    }
+    const q = tokenOutQuery.trim();
+    const sync = q ? resolveToken(dst, q) : undefined;
+    if (sync || !q || !isAddress(q)) {
+      setTokenOut(sync ?? null);
+      setTokenOutResolving(false);
+      return;
+    }
+    let cancelled = false;
+    setTokenOut(null);
+    setTokenOutResolving(true);
+    const handle = setTimeout(() => {
+      resolveTokenAsync(dst, q)
+        .then((t) => !cancelled && setTokenOut(t ?? null))
+        .finally(() => !cancelled && setTokenOutResolving(false));
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(handle);
+    };
+  }, [tokenOutQuery, dst, hookKind]);
+
   const srcChains = chainsForToken(token);
   const dstChains = destinationsFor(token, src);
 
   const amount = tryParseUnits(amountStr, decimals);
-  const recipient: Address | undefined = sendToSelf
+  // The user's address: who ultimately receives the funds. With no hook it's the on-chain recipient;
+  // with a hook it's encoded INTO hookData (the on-chain recipient becomes the hook contract).
+  const beneficiary: Address | undefined = sendToSelf
     ? (address as Address | undefined)
     : isAddress(recipientStr)
       ? (recipientStr as Address)
@@ -122,12 +172,50 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
   const forwarding = bridgeType === BRIDGE_CCTP ? relayMint : true;
   const baseFee = tryParseUnits(baseFeeStr, decimals) ?? 0n;
 
-  // Optional destination execution: a hook payload + the gas budget to run it on the recipient.
-  const hookDataRaw = hookDataStr.trim() || "0x";
-  const hookDataValid = HEX_RE.test(hookDataRaw);
-  const hookData: Hex = hookDataValid ? (hookDataRaw as Hex) : "0x";
-  const hasHook = hookData !== "0x";
-  const callbackGasLimit = gasLimitStr ? BigInt(gasLimitStr) : 0n;
+  // The amount that actually arrives at the recipient/hook (CCTP nets transport+mint fees; OFT is 1:1).
+  // Computed from primitives so it can feed the swap quote BEFORE the order/params are built.
+  const outputAmount = amount ? outputAmountOf({ bridgeType, amount, maxFee, mintFee }) : 0n;
+
+  // Manual destination-execution payload (Advanced) — only used when no preset action is selected.
+  const manualHookDataRaw = hookDataStr.trim() || "0x";
+  const manualHookDataValid = HEX_RE.test(manualHookDataRaw);
+  const manualHookData: Hex = manualHookDataValid ? (manualHookDataRaw as Hex) : "0x";
+  const manualGas = gasLimitStr ? BigInt(gasLimitStr) : 0n;
+
+  // Live "best pool" Uniswap quote for the swap hook: on the DESTINATION chain, swapping the arriving
+  // stable (outputAmount) into the chosen token. Drives the amountOutMinimum baked into the order.
+  const swapTokenIn = tokenInfo(dst, token)?.address;
+  const { quote, loading: quoteLoading, error: quoteError, noPool } = useSwapQuote({
+    dstChainId: dst,
+    tokenIn: swapTokenIn,
+    tokenOut: hookKind === "uniswap" ? tokenOut?.address : undefined,
+    amountIn: outputAmount,
+    slippageBps,
+    enabled: hookKind === "uniswap",
+  });
+
+  // The on-chain triple. With a hook, recipient = the hook contract and the beneficiary + params live in
+  // hookData; with no hook, recipient = beneficiary and the Advanced manual payload (if any) is used.
+  const swapReady = hookKind === "uniswap" && !!tokenOut && !!quote;
+  const effectiveRecipient: Address | undefined =
+    hookKind === "none" ? beneficiary : hookAddress(hookKind, dst);
+  const effectiveHookData: Hex =
+    hookKind === "none"
+      ? manualHookData
+      : !beneficiary
+        ? "0x"
+        : hookKind === "aave"
+          ? encodeAaveHookData(beneficiary)
+          : swapReady
+            ? encodeUniswapHookData({
+                user: beneficiary,
+                tokenOut: tokenOut!.address,
+                poolFee: quote!.poolFee,
+                amountOutMinimum: quote!.amountOutMin,
+              })
+            : "0x";
+  const effectiveGas: bigint = hookKind === "none" ? manualGas : HOOK_CALLBACK_GAS[hookKind];
+  const hasHook = hookKind !== "none" || manualHookData !== "0x";
   // Delivery window keys off the bridge speed (CCTP fast vs finalized); the discount rate is derived
   // so the premium decays linearly to zero across that window (no flat/capped tail). Both stay
   // overridable from Advanced.
@@ -137,14 +225,13 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
   const discountRate = discountRateStr ? BigInt(discountRateStr) : autoDiscountRate;
 
   const params: BridgeParams | null =
-    amount && recipient
-      ? { token, bridgeType, srcChainId: src, dstChainId: dst, amount, recipient, maxFee, mintFee, minFinalityThreshold: finality, deliveryWindow, discountRate, baseFee, callbackGasLimit, hookData }
+    amount && effectiveRecipient
+      ? { token, bridgeType, srcChainId: src, dstChainId: dst, amount, recipient: effectiveRecipient, maxFee, mintFee, minFinalityThreshold: finality, deliveryWindow, discountRate, baseFee, callbackGasLimit: effectiveGas, hookData: effectiveHookData }
       : null;
 
   // Live LayerZero native send-fee quote (OFT only) for the fee preview.
   const { fee: lzFee, loading: lzFeeLoading } = useOftFee(params);
 
-  const outputAmount = params ? outputAmountOf(params) : 0n;
   const amountUsd = amount ? Number(formatUnits(amount, decimals)) : 0;
 
   // Source balance for the MAX button.
@@ -156,13 +243,26 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
   if (!contractsConfigured) errors.push("Contracts not configured (set env)");
   if (!amount || amount <= 0n) errors.push("Enter an amount");
   else if (amountUsd > maxUsdPerTransfer) errors.push(`Demo cap is ${maxUsdPerTransfer} (real money)`);
-  if (!recipient) errors.push("Enter a valid recipient");
+  if (!beneficiary) errors.push("Enter a valid recipient");
   if (bridgeType === BRIDGE_CCTP && amount && maxFee + mintFee >= amount) errors.push("CCTP fees must be < amount");
   if (mintFeeMisconfigured)
     errors.push(`Relay Mint is on but the mint fee "${cctpMintFeeUsd}" is invalid — set NEXT_PUBLIC_CCTP_MINT_FEE_USD to a positive amount, or turn off Relay Mint`);
   if (amount && baseFee >= outputAmount) errors.push("baseFee must be < output amount");
-  if (!hookDataValid) errors.push("hookData must be 0x-prefixed hex");
-  if (hasHook && callbackGasLimit === 0n) errors.push("Set a callback gas limit for the hook");
+  if (hookKind === "none" && !manualHookDataValid) errors.push("hookData must be 0x-prefixed hex");
+  if (hasHook && effectiveGas === 0n) errors.push("Set a callback gas limit for the hook");
+  if (hookKind !== "none" && !hookAddress(hookKind, dst))
+    errors.push(`${HOOK_LABEL[hookKind]} isn't available on ${REGISTRY[dst].shortName}`);
+  if (hookKind === "uniswap") {
+    if (!tokenOutQuery.trim()) errors.push("Enter a token to swap into");
+    else if (tokenOutResolving) errors.push("Resolving the swap token…");
+    else if (!tokenOut) errors.push("Unknown token — enter a symbol or paste a contract address");
+    else if (swapTokenIn && tokenOut.address.toLowerCase() === swapTokenIn.toLowerCase())
+      errors.push(`Choose a token other than ${token} to swap into`);
+    else if (quoteLoading) errors.push("Fetching the best swap quote…");
+    else if (noPool) errors.push(`No Uniswap pool for ${token}→${tokenOut.symbol} on ${REGISTRY[dst].shortName}`);
+    else if (quoteError) errors.push("Swap quote failed — try again");
+    else if (!quote) errors.push("Waiting for a swap quote");
+  }
   if (params && !isRouteSupported(token, src, dst)) errors.push("Unsupported route");
   const canSubmit = errors.length === 0 && state.phase !== "submitting" && state.phase !== "confirming";
 
@@ -183,9 +283,11 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
         dstChainId: dst,
         amount: amount!.toString(),
         outputAmount: outputAmount.toString(),
-        recipient: recipient!,
+        recipient: beneficiary!,
         srcTxHash: res.srcTxHash,
         forwarding,
+        hookKind,
+        swapTokenSymbol: hookKind === "uniswap" ? tokenOut?.symbol : undefined,
         createdAt: Date.now(),
       });
     } catch {
@@ -260,7 +362,7 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
       {/* Recipient */}
       <div>
         <div className="flex items-center justify-between">
-          <label className="label">Recipient on {REGISTRY[dst].shortName}</label>
+          <label className="label">{hookKind === "none" ? "Recipient" : "Beneficiary"} on {REGISTRY[dst].shortName}</label>
           <label className="flex items-center gap-1 text-[11px] text-slate-400">
             <input type="checkbox" checked={sendToSelf} onChange={(e) => setSendToSelf(e.target.checked)} />
             send to myself
@@ -273,6 +375,86 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
           onChange={(e) => setRecipientStr(e.target.value)}
           disabled={sendToSelf}
         />
+      </div>
+
+      {/* Destination action (optional hook) */}
+      <div>
+        <label className="label flex items-center gap-1">
+          <span>Destination action</span>
+          <InfoTip label="What is a destination action?">
+            Run a contract the instant funds arrive on {REGISTRY[dst].shortName}: deposit the bridged{" "}
+            {token} into Aave, or swap it into another token via Uniswap. If the action reverts, the
+            original {token} is delivered to the beneficiary instead — funds are never stuck.
+          </InfoTip>
+        </label>
+        <div className="flex gap-2 rounded-lg border border-edge bg-ink p-1">
+          {(["none", "aave", "uniswap"] as HookKind[]).map((k) => (
+            <button key={k} onClick={() => setHookKind(k)} className={`seg ${hookKind === k ? "seg-on" : "seg-off"}`}>
+              {HOOK_LABEL[k]}
+            </button>
+          ))}
+        </div>
+
+        {hookKind === "aave" && (
+          <p className="mt-2 rounded-lg border border-edge bg-ink/60 p-3 text-[12px] text-slate-400">
+            Supplies the delivered {token} into Aave V3 on {REGISTRY[dst].shortName}; aTokens are minted to{" "}
+            {sendToSelf ? "you" : "the beneficiary"}.
+          </p>
+        )}
+
+        {hookKind === "uniswap" && (
+          <div className="mt-2 space-y-2">
+            <div>
+              <label className="label">Swap into (symbol or address on {REGISTRY[dst].shortName})</label>
+              <TokenCombobox
+                chainId={dst}
+                value={tokenOutQuery}
+                onChange={setTokenOutQuery}
+                resolved={tokenOut}
+                excludeAddress={swapTokenIn}
+                invalid={!!tokenOutQuery.trim() && !tokenOut && !tokenOutResolving}
+                placeholder="WETH, DAI, or 0x…"
+              />
+              {tokenOut ? (
+                <p className="mt-1 text-[11px] text-slate-500">
+                  {tokenOut.symbol} · {tokenOut.decimals}dp ·{" "}
+                  <span className="font-mono">
+                    {tokenOut.address.slice(0, 6)}…{tokenOut.address.slice(-4)}
+                  </span>
+                </p>
+              ) : tokenOutResolving ? (
+                <p className="mt-1 text-[11px] text-slate-500">Resolving…</p>
+              ) : tokenOutQuery.trim() ? (
+                <p className="mt-1 text-[11px] text-bad">Unknown token — enter a known symbol or paste a contract address.</p>
+              ) : null}
+            </div>
+
+            {/* Live best-pool quote */}
+            <div className="rounded-lg border border-edge bg-ink/60 p-2 text-[12px]">
+              {!tokenOut ? (
+                <span className="text-slate-500">Enter a token to fetch the best quote.</span>
+              ) : quoteLoading ? (
+                <span className="text-slate-500">Finding the best pool…</span>
+              ) : noPool ? (
+                <span className="text-warn">
+                  No Uniswap V3 pool for {token} → {tokenOut.symbol} on {REGISTRY[dst].shortName}.
+                </span>
+              ) : quoteError ? (
+                <span className="text-bad">Quote failed — retry.</span>
+              ) : quote ? (
+                <span className="text-slate-300">
+                  ≈ {fmtAmount(quote.amountOut, tokenOut.decimals, 6)} {tokenOut.symbol}{" "}
+                  <span className="text-slate-500">
+                    · best tier {(quote.poolFee / 10_000).toFixed(2)}% · min{" "}
+                    {fmtAmount(quote.amountOutMin, tokenOut.decimals, 6)} @ {(slippageBps / 100).toFixed(2)}% slippage
+                  </span>
+                </span>
+              ) : (
+                <span className="text-slate-500">Waiting for a quote…</span>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* CCTP-only: speed + (relayer-managed) settlement */}
@@ -372,6 +554,24 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
               <label className="label">baseFee ({token})</label>
               <input className="input font-mono" value={baseFeeStr} onChange={(e) => setBaseFeeStr(e.target.value)} />
             </div>
+            {hookKind === "uniswap" && (
+              <div>
+                <label className="label flex items-center gap-1">
+                  <span>swap slippage</span>
+                  <InfoTip label="What is swap slippage?">
+                    The minimum output is locked into the order when you sign and the swap runs on
+                    delivery. A little room absorbs price drift before the relayer fills; too tight and
+                    the swap reverts (you then receive the original {token}).
+                  </InfoTip>
+                </label>
+                <select className="input" value={slippageBps} onChange={(e) => setSlippageBps(Number(e.target.value))}>
+                  <option value={10}>0.1%</option>
+                  <option value={50}>0.5%</option>
+                  <option value={100}>1.0%</option>
+                  <option value={300}>3.0%</option>
+                </select>
+              </div>
+            )}
             <div>
               <label className="label flex items-center gap-1">
                 <span>callback gas limit</span>
@@ -381,11 +581,12 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
                 </InfoTip>
               </label>
               <input
-                className="input font-mono"
+                className="input font-mono disabled:opacity-50"
                 placeholder="0 (deliver funds only)"
-                value={gasLimitStr}
+                value={hookKind === "none" ? gasLimitStr : effectiveGas.toString()}
                 onChange={(e) => setGasLimitStr(e.target.value.replace(/\D/g, ""))}
                 inputMode="numeric"
+                disabled={hookKind !== "none"}
               />
             </div>
             <div className="col-span-2">
@@ -397,11 +598,21 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
                 </InfoTip>
               </label>
               <input
-                className={`input font-mono ${hookDataValid ? "" : "border-bad focus:border-bad"}`}
+                className={`input font-mono disabled:opacity-50 ${hookKind === "none" && !manualHookDataValid ? "border-bad focus:border-bad" : ""}`}
                 placeholder="0x"
-                value={hookDataStr}
+                value={hookKind === "none" ? hookDataStr : effectiveHookData}
                 onChange={(e) => setHookDataStr(e.target.value)}
+                disabled={hookKind !== "none"}
               />
+              {hookKind !== "none" && (
+                <p className="mt-1 text-[11px] text-slate-500">
+                  Auto-encoded by the “{HOOK_LABEL[hookKind]}” action above (recipient ={" "}
+                  <span className="font-mono">
+                    {effectiveRecipient ? `${effectiveRecipient.slice(0, 6)}…${effectiveRecipient.slice(-4)}` : "—"}
+                  </span>
+                  ).
+                </p>
+              )}
             </div>
           </div>
         )}
@@ -421,7 +632,13 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
 
       {/* Submit */}
       <button className="btn-primary w-full" disabled={!canSubmit || busy} onClick={onSubmit}>
-        {busy ? state.message ?? "Working…" : `Send ${amountStr || ""} ${token}`}
+        {busy
+          ? (state.message ?? "Working…")
+          : hookKind === "aave"
+            ? `Send ${amountStr || ""} ${token} → Aave`
+            : hookKind === "uniswap"
+              ? `Swap ${amountStr || ""} ${token} → ${tokenOut?.symbol ?? "token"}`
+              : `Send ${amountStr || ""} ${token}`}
       </button>
 
       {state.phase === "error" && state.error && (
