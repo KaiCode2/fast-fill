@@ -19,11 +19,12 @@ export interface DocMeta {
   file: string;
 }
 
-/** The six core protocol docs, in sidebar order. */
+/** The core protocol docs, in sidebar order. */
 export const DOCS: DocMeta[] = [
   { slug: "", title: "Overview", group: "Overview", file: "README.md" },
   { slug: "demo", title: "Live demo", group: "Overview", file: "DEMO.md" },
   { slug: "architecture", title: "Architecture", group: "Design", file: "docs/ARCHITECTURE.md" },
+  { slug: "pricing", title: "Pricing", group: "Design", file: "docs/PRICING.md" },
   { slug: "gateway", title: "Gateway (design)", group: "Design", file: "docs/GATEWAY.md" },
   { slug: "deployments", title: "Deployments", group: "Reference", file: "DEPLOYMENTS.md" },
   { slug: "gas", title: "Gas benchmarks", group: "Reference", file: "docs/GAS.md" },

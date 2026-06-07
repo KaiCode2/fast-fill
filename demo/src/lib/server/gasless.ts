@@ -11,6 +11,7 @@ import { pub, relayerAccount, wallet, withChainLock } from "./clients";
 import { adapterAddressServer, MAX_TRANSFER_BASE_UNITS, OFT_COMPOSE_GAS, OFT_LZRECEIVE_GAS } from "./env";
 import { registerJob } from "./relayer";
 import { jobByPermit } from "./store";
+import { assertGaslessPricing } from "./pricing";
 import { reconstructAndVerify } from "./verify";
 
 const nowSec = () => BigInt(Math.floor(Date.now() / 1000));
@@ -69,6 +70,7 @@ export async function submitGasless(req: GaslessBridgeRequest): Promise<{ orderI
   const dup = jobByPermit(req.from, req.permit.nonce);
   if (dup?.srcTxHash) return { orderId: dup.orderId, srcTxHash: dup.srcTxHash };
   preGuard(req);
+  await assertGaslessPricing(req);
 
   const src = req.srcChainId as SupportedChainId;
   const adapter = adapterAddressServer(req.bridgeType);

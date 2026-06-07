@@ -1,22 +1,19 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { formatUnits, isAddress, parseUnits, type Address, type Hex } from "viem";
 import { useAccount } from "wagmi";
-import type { SubmitMode } from "@/lib/api";
+import type { PricingQuoteRequest, SubmitMode } from "@/lib/api";
 import {
   deliveryWindowFor,
   FINALITY_FAST,
   FINALITY_FINALIZED,
   outputAmountOf,
-  parseMintFee,
-  suggestMaxFee,
   type BridgeParams,
 } from "@/lib/bridge";
 import { REGISTRY, SUPPORTED_CHAIN_IDS, tokenInfo, type SupportedChainId, type TokenSymbol } from "@/lib/chains";
-import { cctpMintFeeUsd, contractsConfigured, maxUsdPerTransfer } from "@/lib/config";
+import { contractsConfigured, maxUsdPerTransfer } from "@/lib/config";
 import { fmtAmount } from "@/lib/format";
-import { DEFAULT_MAX_FEE_RATE, linearDiscountRate } from "@/lib/pricing";
 import { bridgeTypeForToken, chainsForToken, destinationsFor, getToken, isRouteSupported } from "@/lib/tokens";
 import { BRIDGE_CCTP } from "@/lib/order";
 import {
@@ -32,6 +29,7 @@ import { DEFAULT_SLIPPAGE_BPS } from "@/lib/uniswap";
 import { useBalances } from "@/hooks/useBalances";
 import { useInitiate } from "@/hooks/useInitiate";
 import { useOftFee } from "@/hooks/useOftFee";
+import { usePricingQuote } from "@/hooks/usePricingQuote";
 import { useSwapQuote } from "@/hooks/useSwapQuote";
 import type { TransferRecord } from "@/hooks/useTransfers";
 import { FeePreview } from "./FeePreview";
@@ -73,8 +71,8 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
   const [advanced, setAdvanced] = useState(false);
   const [maxFeeStr, setMaxFeeStr] = useState(""); // empty → auto
   const [windowStr, setWindowStr] = useState(""); // empty → auto (from fast/slow)
-  const [discountRateStr, setDiscountRateStr] = useState(""); // empty → auto (linear over the window)
-  const [baseFeeStr, setBaseFeeStr] = useState("0");
+  const [discountRateStr, setDiscountRateStr] = useState(""); // empty → auto (10% APR opportunity cost)
+  const [baseFeeStr, setBaseFeeStr] = useState(""); // empty → auto (gas-backed)
   const [hookDataStr, setHookDataStr] = useState("0x"); // destination-execution payload ("0x" = none)
   const [gasLimitStr, setGasLimitStr] = useState(""); // callback gas for the recipient's onFastFill hook
 
@@ -151,36 +149,55 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
       ? (recipientStr as Address)
       : undefined;
 
-  const maxFee = useMemo(() => {
-    if (bridgeType !== BRIDGE_CCTP || finality === FINALITY_FINALIZED) return 0n;
-    if (maxFeeStr) return tryParseUnits(maxFeeStr, decimals) ?? 0n;
-    return amount ? suggestMaxFee(amount) : 0n;
-  }, [bridgeType, finality, maxFeeStr, decimals, amount]);
-
-  // "Relay Mint" (CCTP only): a non-zero mintFee routes settlement through the CctpExecutor so the
-  // relayer is paid to guarantee delivery whether or not an optimistic filler shows up. When the
-  // toggle is off we fall back to the legacy direct-settle path (no executor fee). For OFT the LZ
-  // executor always auto-delivers settlement, so forwarding stays on.
+  // "Relay Mint" (CCTP only): a non-zero mintFee routes settlement through the CctpExecutor. The fee
+  // is now live-quoted from destination gas, not a fixed env var. Off: direct-settle path.
   const relayMintActive = bridgeType === BRIDGE_CCTP && relayMint;
-  // When Relay Mint is on, the configured fee MUST parse to a positive amount. A malformed, empty, or
-  // zero `NEXT_PUBLIC_CCTP_MINT_FEE_USD` would otherwise silently downgrade the order to the direct
-  // settle path (mintFee = 0) while the UI still promised executor-guaranteed delivery — so catch it
-  // and block submission rather than mislead. (Off → mintFee 0 is the intended optimistic-only path.)
-  const configuredMintFee = relayMintActive ? parseMintFee(cctpMintFeeUsd, decimals) : 0n;
-  const mintFeeMisconfigured = configuredMintFee === null;
-  const mintFee = configuredMintFee ?? 0n;
   const forwarding = bridgeType === BRIDGE_CCTP ? relayMint : true;
-  const baseFee = tryParseUnits(baseFeeStr, decimals) ?? 0n;
-
-  // The amount that actually arrives at the recipient/hook (CCTP nets transport+mint fees; OFT is 1:1).
-  // Computed from primitives so it can feed the swap quote BEFORE the order/params are built.
-  const outputAmount = amount ? outputAmountOf({ bridgeType, amount, maxFee, mintFee }) : 0n;
 
   // Manual destination-execution payload (Advanced) — only used when no preset action is selected.
   const manualHookDataRaw = hookDataStr.trim() || "0x";
   const manualHookDataValid = HEX_RE.test(manualHookDataRaw);
   const manualHookData: Hex = manualHookDataValid ? (manualHookDataRaw as Hex) : "0x";
   const manualGas = gasLimitStr ? BigInt(gasLimitStr) : 0n;
+  const effectiveGas: bigint = hookKind === "none" ? manualGas : HOOK_CALLBACK_GAS[hookKind];
+  const hasHook = hookKind !== "none" || manualHookData !== "0x";
+
+  const autoWindow = deliveryWindowFor(bridgeType, finality);
+  const deliveryWindow = windowStr ? BigInt(windowStr) : autoWindow;
+
+  const pricingRequest: PricingQuoteRequest | null =
+    amount && amount > 0n && isRouteSupported(token, src, dst)
+      ? {
+          bridgeType,
+          token,
+          srcChainId: src,
+          dstChainId: dst,
+          amount: amount.toString(),
+          finality,
+          relayMint: relayMintActive,
+          deliveryWindow: deliveryWindow.toString(),
+          callbackGasLimit: effectiveGas.toString(),
+        }
+      : null;
+  const { quote: pricingQuote, loading: pricingLoading, error: pricingError } = usePricingQuote(pricingRequest);
+  const quotedParams = pricingQuote?.params;
+  const quotedMaxFee = quotedParams ? BigInt(quotedParams.maxFee) : 0n;
+
+  const maxFee =
+    bridgeType === BRIDGE_CCTP
+      ? finality === FINALITY_FINALIZED
+        ? quotedMaxFee
+        : maxFeeStr
+          ? (tryParseUnits(maxFeeStr, decimals) ?? 0n)
+          : quotedMaxFee
+      : 0n;
+  const mintFee = relayMintActive && quotedParams ? BigInt(quotedParams.mintFee) : 0n;
+  const baseFee = baseFeeStr ? (tryParseUnits(baseFeeStr, decimals) ?? 0n) : quotedParams ? BigInt(quotedParams.baseFee) : 0n;
+
+  // The amount that actually arrives at the recipient/hook (CCTP nets transport+mint fees; OFT is 1:1).
+  // Computed from primitives so it can feed the swap quote BEFORE the order/params are built.
+  const outputAmount = amount ? outputAmountOf({ bridgeType, amount, maxFee, mintFee }) : 0n;
+  const discountRate = discountRateStr ? BigInt(discountRateStr) : quotedParams ? BigInt(quotedParams.discountRate) : 0n;
 
   // Live "best pool" Uniswap quote for the swap hook: on the DESTINATION chain, swapping the arriving
   // stable (outputAmount) into the chosen token. Drives the amountOutMinimum baked into the order.
@@ -214,16 +231,6 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
                 amountOutMinimum: quote!.amountOutMin,
               })
             : "0x";
-  const effectiveGas: bigint = hookKind === "none" ? manualGas : HOOK_CALLBACK_GAS[hookKind];
-  const hasHook = hookKind !== "none" || manualHookData !== "0x";
-  // Delivery window keys off the bridge speed (CCTP fast vs finalized); the discount rate is derived
-  // so the premium decays linearly to zero across that window (no flat/capped tail). Both stay
-  // overridable from Advanced.
-  const autoWindow = deliveryWindowFor(bridgeType, finality);
-  const deliveryWindow = windowStr ? BigInt(windowStr) : autoWindow;
-  const autoDiscountRate = linearDiscountRate(deliveryWindow, DEFAULT_MAX_FEE_RATE);
-  const discountRate = discountRateStr ? BigInt(discountRateStr) : autoDiscountRate;
-
   const params: BridgeParams | null =
     amount && effectiveRecipient
       ? { token, bridgeType, srcChainId: src, dstChainId: dst, amount, recipient: effectiveRecipient, maxFee, mintFee, minFinalityThreshold: finality, deliveryWindow, discountRate, baseFee, callbackGasLimit: effectiveGas, hookData: effectiveHookData }
@@ -243,10 +250,11 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
   if (!contractsConfigured) errors.push("Contracts not configured (set env)");
   if (!amount || amount <= 0n) errors.push("Enter an amount");
   else if (amountUsd > maxUsdPerTransfer) errors.push(`Demo cap is ${maxUsdPerTransfer} (real money)`);
+  if (pricingRequest && pricingLoading) errors.push("Fetching live pricing quote");
+  else if (pricingRequest && pricingError) errors.push(`Pricing quote failed: ${pricingError}`);
+  else if (pricingRequest && !pricingQuote) errors.push("Waiting for live pricing quote");
   if (!beneficiary) errors.push("Enter a valid recipient");
   if (bridgeType === BRIDGE_CCTP && amount && maxFee + mintFee >= amount) errors.push("CCTP fees must be < amount");
-  if (mintFeeMisconfigured)
-    errors.push(`Relay Mint is on but the mint fee "${cctpMintFeeUsd}" is invalid — set NEXT_PUBLIC_CCTP_MINT_FEE_USD to a positive amount, or turn off Relay Mint`);
   if (amount && baseFee >= outputAmount) errors.push("baseFee must be < output amount");
   if (hookKind === "none" && !manualHookDataValid) errors.push("hookData must be 0x-prefixed hex");
   if (hasHook && effectiveGas === 0n) errors.push("Set a callback gas limit for the hook");
@@ -476,9 +484,9 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
               <span>Relay Mint</span>
               <InfoTip label="What is Relay Mint?">
                 Uses the CCTP executor contract to ensure your funds are delivered on the destination
-                whether or not an optimistic filler shows up — for a flat ${Number(cctpMintFeeUsd).toFixed(2)}{" "}
-                mint fee. Off: settlement falls back to the optimistic filler, and if none fills you
-                settle the bridge yourself.
+                whether or not an optimistic filler shows up. The mint fee is quoted from live
+                destination gas with a 25% buffer. Off: settlement falls back to the optimistic
+                filler, and if none fills you settle the bridge yourself.
               </InfoTip>
             </label>
             <label className="flex h-[38px] cursor-pointer items-center gap-2 rounded-lg border border-edge bg-ink px-3 text-sm transition hover:border-accent/60">
@@ -486,16 +494,13 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
               <span className="text-slate-300">
                 {!relayMint
                   ? "optimistic only"
-                  : mintFeeMisconfigured
-                    ? "fee misconfigured"
-                    : `guaranteed · $${Number(cctpMintFeeUsd).toFixed(2)}`}
+                  : pricingLoading
+                    ? "quoting…"
+                    : pricingQuote
+                      ? `guaranteed · ${fmtAmount(mintFee, decimals, 4)} ${token}`
+                      : "quote needed"}
               </span>
             </label>
-            {mintFeeMisconfigured && (
-              <p className="mt-1 text-[11px] text-bad">
-                Invalid mint fee config (<code>NEXT_PUBLIC_CCTP_MINT_FEE_USD</code> = &quot;{cctpMintFeeUsd}&quot;).
-              </p>
-            )}
           </div>
         </div>
       )}
@@ -511,6 +516,8 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
         mintFee={mintFee}
         lzFeeWei={bridgeType === BRIDGE_CCTP ? undefined : lzFee}
         lzFeeLoading={lzFeeLoading}
+        pricingBreakdown={pricingQuote?.breakdown}
+        comparison={pricingQuote?.comparison}
       />
 
       {/* Advanced */}
@@ -522,10 +529,10 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
           <div className="mt-2 grid grid-cols-2 gap-3">
             {bridgeType === BRIDGE_CCTP && (
               <div>
-                <label className="label">maxFee ({token}, fast)</label>
+                <label className="label">maxFee ({token})</label>
                 <input
                   className="input font-mono"
-                  placeholder={amount ? formatUnits(suggestMaxFee(amount), decimals) : "auto"}
+                  placeholder={quotedParams ? formatUnits(BigInt(quotedParams.maxFee), decimals) : "auto"}
                   value={maxFeeStr}
                   onChange={(e) => setMaxFeeStr(e.target.value)}
                   disabled={finality === FINALITY_FINALIZED}
@@ -545,14 +552,19 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
               <label className="label">discountRate (WAD/s)</label>
               <input
                 className="input font-mono"
-                placeholder={`${autoDiscountRate} (auto: linear)`}
+                placeholder={quotedParams ? `${quotedParams.discountRate} (auto: 10% APR)` : "auto"}
                 value={discountRateStr}
                 onChange={(e) => setDiscountRateStr(e.target.value.replace(/\D/g, ""))}
               />
             </div>
             <div>
               <label className="label">baseFee ({token})</label>
-              <input className="input font-mono" value={baseFeeStr} onChange={(e) => setBaseFeeStr(e.target.value)} />
+              <input
+                className="input font-mono"
+                placeholder={quotedParams ? formatUnits(BigInt(quotedParams.baseFee), decimals) : "auto"}
+                value={baseFeeStr}
+                onChange={(e) => setBaseFeeStr(e.target.value)}
+              />
             </div>
             {hookKind === "uniswap" && (
               <div>

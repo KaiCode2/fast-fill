@@ -218,6 +218,10 @@ which `expectedDeliveryTime = block.timestamp + deliveryWindow`. The bridges exp
 default from known bridge latencies). Signing a *relative* window — rather than an absolute timestamp —
 means the window the user agreed to holds no matter when a sponsoring relayer actually submits.
 
+The demo and relayers now choose default signed pricing values from factual inputs: gas benchmarks,
+live destination gas price, ETH/USD, Circle CCTP fees, and a 10% APR capital-cost assumption. See
+[`docs/PRICING.md`](./PRICING.md) for the off-chain quote model and relayer enforcement rules.
+
 ---
 
 ## 6. CCTP v2 integration

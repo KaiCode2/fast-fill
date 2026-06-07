@@ -43,8 +43,10 @@ export function registerJob(
     dstChainId: v.order.dstChainId as SupportedChainId,
     srcTxHash: v.srcTxHash,
     srcBlockNumber: v.srcBlockNumber,
+    mintFee: v.mintFee,
     forwarding,
     phase: "VERIFIED",
+    executorRouted: v.bridgeType === BRIDGE_CCTP && v.mintFee > 0n,
     attempts: 0,
     nextActionAt: 0,
     createdAt: Date.now(),
@@ -95,7 +97,7 @@ async function runFillStage(job: OrderJob) {
   }
 
   patchJob(job.orderId, { phase: "FILLING" });
-  const out = await fillOrder(job.order, job.bridgeType);
+  const out = await fillOrder(job.order, job.bridgeType, job.mintFee);
   const me = relayerAccount().address as Hex;
   if (out.kind === "filled") {
     patchJob(job.orderId, {

@@ -5,7 +5,8 @@ import { erc20Abi } from "@/lib/abis/erc20";
 import type { SupportedChainId } from "@/lib/chains";
 import { bytes32ToAddress, BRIDGE_CCTP, type Order } from "@/lib/order";
 import { pub, relayerAccount, wallet, withChainLock } from "./clients";
-import { adapterAddressServer, MIN_FEE_TO_FILL } from "./env";
+import { adapterAddressServer } from "./env";
+import { requiredFillFeeForOrder } from "./pricing";
 
 export type FillOutcome =
   | { kind: "filled"; fillTxHash: Hex; payout: bigint; fee: bigint }
@@ -16,8 +17,8 @@ export type FillOutcome =
 
 const nowSec = () => BigInt(Math.floor(Date.now() / 1000));
 
-/** Quote → liquidity check → simulate → fill. The relayer is the filler and the payer. */
-export async function fillOrder(order: Order, bridgeType: number): Promise<FillOutcome> {
+/** Quote → liquidity check → gas-floor policy → simulate → fill. The relayer is the filler and the payer. */
+export async function fillOrder(order: Order, bridgeType: number, mintFee = 0n): Promise<FillOutcome> {
   const dst = order.dstChainId as SupportedChainId;
   const adapter = adapterAddressServer(bridgeType);
   const abi = bridgeType === BRIDGE_CCTP ? cctpAdapterAbi : oftAdapterAbi;
@@ -41,7 +42,14 @@ export async function fillOrder(order: Order, bridgeType: number): Promise<FillO
     functionName: "quoteFill",
     args: [order, nowSec()],
   })) as readonly [bigint, bigint];
-  if (fee < MIN_FEE_TO_FILL) return { kind: "skipped", reason: "premium below minimum" };
+  const requiredFee = await requiredFillFeeForOrder({
+    bridgeType,
+    dstChainId: dst,
+    callbackGasLimit: order.callbackGasLimit,
+    mintFee,
+    decimals: 6,
+  });
+  if (fee < requiredFee) return { kind: "skipped", reason: `premium below gas floor (${fee} < ${requiredFee})` };
 
   try {
     const fillTxHash = await withChainLock(dst, async () => {

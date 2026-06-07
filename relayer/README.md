@@ -46,7 +46,8 @@ relayer/
    registry, then **recompute `orderId` and require it to equal the emitted one** (the authenticity
    gate — fill a wrong order and you are never reimbursed).
 3. **Fill** — skip if already filled (`getOrder`); check token policy + size cap; check inventory
-   (`balanceOf`); quote the fee (`quoteFill`) against `RELAYER_MIN_FEE`; simulate then send `fill`.
+   (`balanceOf`); quote the fee (`quoteFill`) against the gas-backed floor plus `RELAYER_MIN_FEE`;
+   simulate then send `fill`.
    The per-chain lock serializes simulate→send→receipt so nonces never race. `outputAmount` reserves
    both the bridge fee and the `mintFee`: `inputAmount - maxFee - mintFee`.
 4. **Settle / mint relay** — poll Circle Iris until `complete`, then:
@@ -84,8 +85,9 @@ cargo run                  # LIVE: sends real fill / settle / execute txs (funds
 Live mode requires a hot wallet funded with the output tokens on the destination chains for
 *filling*; the bot pre-approves each adapter at startup. *Mint relaying* needs only gas (the executor
 pays the bot in USDC). Guards: per-token fill enable list + size cap (`RELAYER_ENABLED_TOKENS`,
-`RELAYER_MAX_*`, default USDC + USDT0 only), `RELAYER_MIN_FEE`, `RELAYER_SRC_CONFIRMATIONS`, and for
-mint relay `RELAYER_MINT_RELAY` / `RELAYER_MIN_MINT_FEE` / `RELAYER_ETH_PRICE_TTL_SECS` / `RELAYER_ETH_PRICE_USD` (fallback).
+`RELAYER_MAX_*`, default USDC + USDT0 only), gas-backed fill pricing plus `RELAYER_MIN_FEE`,
+`RELAYER_SRC_CONFIRMATIONS`, and for mint relay `RELAYER_MINT_RELAY` / `RELAYER_MIN_MINT_FEE` /
+`RELAYER_ETH_PRICE_TTL_SECS` / `RELAYER_ETH_PRICE_USD` (fallback).
 
 Deployed addresses (CREATE2-identical on Base / Optimism / Arbitrum; source `DEPLOYMENTS.md`):
 `FastFillConfig 0xaec766…3DF5`, `CctpAdapter 0x9FA37f…bA75` (executor-enabled),

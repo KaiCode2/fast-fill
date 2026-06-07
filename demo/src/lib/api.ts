@@ -76,6 +76,54 @@ export interface GaslessBridgeRequest {
   permit: { nonce: string; deadline: string; signature: Hex };
 }
 
+export interface PricingQuoteRequest {
+  bridgeType: number;
+  token: TokenSymbol;
+  srcChainId: SupportedChainId;
+  dstChainId: SupportedChainId;
+  amount: string;
+  finality: number;
+  relayMint: boolean;
+  deliveryWindow: string;
+  callbackGasLimit: string;
+}
+
+export interface PricingQuoteResponse {
+  params: {
+    maxFee: string;
+    mintFee: string;
+    baseFee: string;
+    discountRate: string;
+    deliveryWindow: string;
+    outputAmount: string;
+  };
+  breakdown: {
+    gasPriceWei: string;
+    ethUsd: string;
+    cctpMinimumFeeBps?: string;
+    cctpProtocolFee?: string;
+    cctpMaxFeeBuffer?: string;
+    fillGasUnits: string;
+    fillGasFee: string;
+    directSettleGasUnits: string;
+    directSettleGasFee: string;
+    executorGasUnits: string;
+    executorGasFee: string;
+    secondsSaved: string;
+    targetTimeFee: string;
+  };
+  comparison?: {
+    circleFastForwarding: string;
+    circleSlowForwarding: string;
+    fastFillEstimated: string;
+    fastProtocolFee: string;
+    slowForwardFee: string;
+    fastForwardFee: string;
+    savingsVsFastForwarding: string;
+    savingsVsSlowForwarding: string;
+  };
+}
+
 async function postJson<T>(url: string, body: unknown): Promise<T> {
   const res = await fetch(url, {
     method: "POST",
@@ -92,6 +140,7 @@ export const api = {
     postJson<{ orderId: Hex; status: string }>("/api/bridge/self", req),
   submitGasless: (req: GaslessBridgeRequest) =>
     postJson<{ orderId: Hex; srcTxHash: Hex; status: string }>("/api/bridge/gasless", req),
+  quotePricing: (req: PricingQuoteRequest) => postJson<PricingQuoteResponse>("/api/bridge/pricing", req),
   settle: (orderId: Hex) => postJson<{ status: string }>(`/api/settle/${orderId}`, {}),
   status: async (orderId: Hex): Promise<OrderStatus> => {
     const res = await fetch(`/api/orders/${orderId}`);
