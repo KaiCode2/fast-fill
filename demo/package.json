@@ -12,7 +12,8 @@
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
     "setup:approvals": "tsx scripts/setup-approvals.ts",
-    "test:parity": "tsx scripts/parity-check.ts"
+    "test:parity": "tsx scripts/parity-check.ts",
+    "test:pricing": "tsx scripts/pricing-check.ts"
   },
   "dependencies": {
     "@rainbow-me/rainbowkit": "^2.2.3",

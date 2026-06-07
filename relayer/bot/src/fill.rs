@@ -2,7 +2,7 @@
 //! Port of `demo/src/lib/server/fill.ts`. The relayer is the filler and the payer.
 
 use alloy::primitives::{Address, B256, U256};
-use alloy::providers::DynProvider;
+use alloy::providers::{DynProvider, Provider};
 use eyre::{eyre, Result};
 
 use crate::app::App;
@@ -67,6 +67,11 @@ async fn try_fill(app: &App, v: &VerifiedOrder) -> Result<FillOutcome> {
     if !pol.enabled {
         return Ok(FillOutcome::Skipped(format!("token {symbol} not enabled")));
     }
+    if symbol != "USDC" && symbol != "USDT0" {
+        return Ok(FillOutcome::Skipped(format!(
+            "gas-backed fill pricing only supports USDC/USDT0 (got {symbol})"
+        )));
+    }
     if v.order.outputAmount > pol.max_size {
         return Ok(FillOutcome::Skipped(format!(
             "outputAmount {} exceeds max {} for {symbol}",
@@ -95,9 +100,20 @@ async fn try_fill(app: &App, v: &VerifiedOrder) -> Result<FillOutcome> {
 
     // Profitability.
     let (payout, fee) = quote_fill(&provider, v, U256::from(now_secs())).await?;
-    if fee < app.settings.min_fee {
+    let gas_price = provider.get_gas_price().await?;
+    let eth_price = app.settings.eth_price.get().await;
+    let direct_cctp_settle = v.bridge_type == BRIDGE_CCTP && v.mint_fee == U256::ZERO;
+    let gas_floor = crate::price::fill_fee_floor(
+        direct_cctp_settle,
+        v.order.callbackGasLimit,
+        gas_price,
+        eth_price,
+        out.decimals,
+    );
+    let required_fee = gas_floor + app.settings.min_fee;
+    if fee < required_fee {
         return Ok(FillOutcome::Skipped(format!(
-            "fee {fee} below min {}",
+            "fee {fee} below gas-backed minimum {required_fee} (gas {gas_floor}, min {})",
             app.settings.min_fee
         )));
     }

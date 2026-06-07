@@ -13,6 +13,7 @@ export interface OrderJob {
   dstChainId: SupportedChainId;
   srcTxHash: Hex;
   srcBlockNumber?: bigint;
+  mintFee: bigint;
   forwarding: boolean;
   phase: OrderPhase;
   fillTxHash?: Hex;

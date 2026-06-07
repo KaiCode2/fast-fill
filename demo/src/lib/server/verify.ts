@@ -14,6 +14,7 @@ export interface VerifiedOrder {
   bridgeType: number;
   srcTxHash: Hex;
   srcBlockNumber: bigint;
+  mintFee: bigint;
 }
 
 function configuredAdapters(): { addr: Address; bridgeType: number }[] {
@@ -98,6 +99,7 @@ export async function reconstructAndVerify(srcChainId: number, txHash: Hex): Pro
   const inputAmount = a[2] as bigint;
   const outputAmount =
     bridgeType === BRIDGE_CCTP ? inputAmount - (a[3] as bigint) - (a[4] as bigint) : (a[3] as bigint);
+  const mintFee = bridgeType === BRIDGE_CCTP ? (a[4] as bigint) : 0n;
   const deliveryWindow = (bridgeType === BRIDGE_CCTP ? a[6] : a[5]) as bigint;
   const discountRate = (bridgeType === BRIDGE_CCTP ? a[7] : a[6]) as bigint;
   const baseFee = (bridgeType === BRIDGE_CCTP ? a[8] : a[7]) as bigint;
@@ -133,5 +135,5 @@ export async function reconstructAndVerify(srcChainId: number, txHash: Hex): Pro
   }
 
   assertOrderAllowed(order);
-  return { order, orderId, bridgeType, srcTxHash: txHash, srcBlockNumber: receipt.blockNumber };
+  return { order, orderId, bridgeType, srcTxHash: txHash, srcBlockNumber: receipt.blockNumber, mintFee };
 }
