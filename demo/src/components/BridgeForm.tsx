@@ -469,7 +469,14 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
       {bridgeType === BRIDGE_CCTP && (
         <div className="grid grid-cols-2 gap-3">
           <div>
-            <label className="label">Bridge speed</label>
+            <label className="label flex items-center gap-1">
+              <span>Settlement speed</span>
+              <InfoTip label="What is settlement speed?">
+                How fast the underlying CCTP bridge settles on {REGISTRY[dst].shortName} as a
+                fallback. You&apos;re optimistically fast-filled in ~15s either way — this only sets
+                when the bridged funds would arrive on their own if no relayer fills.
+              </InfoTip>
+            </label>
             <div className="flex gap-2 rounded-lg border border-edge bg-ink p-1">
               <button onClick={() => setFinality(FINALITY_FAST)} className={`seg ${finality === FINALITY_FAST ? "seg-on" : "seg-off"}`}>
                 Fast

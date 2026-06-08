@@ -70,14 +70,21 @@ Response:
     "targetTimeFee": "..."
   },
   "comparison": {
-    "circleFastForwarding": "...",
-    "circleSlowForwarding": "...",
-    "fastFillEstimated": "..."
+    "speed": "fast",
+    "forwarding": true,
+    "circleDirect": "...",
+    "circleProtocolFee": "...",
+    "circleForwardFee": "...",
+    "cctpDirectReceived": "...",
+    "fastFillEstimated": "...",
+    "savings": "..."
   }
 }
 ```
 
-`comparison` is present only for CCTP routes.
+`comparison` is present only for CCTP routes. It is a single apples-to-apples reference matching the
+request's settlement speed (`finality`) and forwarding choice (`relayMint`), not a matrix of every
+Circle option.
 
 ## Inputs
 
@@ -233,13 +240,25 @@ For small demo transfers this often rounds up to exactly one token base unit. Th
 
 ## CCTP comparison panel
 
-The UI shows a CCTP-only comparison so users can compare fast-fill with using Circle directly.
+The UI shows a CCTP-only comparison so users can compare fast-fill with using Circle directly. To
+keep it an apples-to-apples comparison, only the single Circle option that matches the user's chosen
+settlement speed and forwarding (Relay Mint) toggle is shown.
 
-| Line | Formula |
+| Field | Formula |
 |---|---|
-| Circle fast + forwarding | Unbuffered Circle fast protocol fee + Circle `forwardFee.med` |
-| Circle slow + forwarding | Circle finalized forwarding fee, usually only `forwardFee.med` |
-| fast-fill estimate | Expected Circle protocol fee + Relay Mint fee + base fill gas + opportunity cost |
+| `speed` | `"slow"` for finalized (`finality === 2000`), otherwise `"fast"` |
+| `forwarding` | Mirrors `relayMint` — whether the Circle reference includes the forwarding fee |
+| `circleProtocolFee` | Unbuffered Circle protocol fee for the selected finality |
+| `circleForwardFee` | Selected finality's `forwardFee.med`, or `0` when forwarding is off |
+| `circleDirect` | `circleProtocolFee + circleForwardFee` — the apples-to-apples Circle cost |
+| `cctpDirectReceived` | `amount − circleDirect` — what the recipient nets via CCTP directly |
+| `fastFillEstimated` | Expected Circle protocol fee + Relay Mint fee + base fill gas + opportunity cost |
+| `savings` | Signed `circleDirect − fastFillEstimated` |
+
+The panel renders one Circle line (`Circle fast`/`Circle slow`, with `+ forwarding` appended only
+when enabled), the fast-fill estimate, and the signed saving. `cctpDirectReceived` is also overlaid
+on the payout curve as an amber benchmark anchored at the settlement time, so users can see they
+receive funds earlier than CCTP direct (and by how much).
 
 The comparison is hidden for OFTs because LayerZero fees are always charged by the bridge; fast-fill
 only changes the speed/relayer premium.

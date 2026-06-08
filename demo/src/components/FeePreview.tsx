@@ -2,7 +2,7 @@
 
 import { formatUnits } from "viem";
 import type { PricingQuoteResponse } from "@/lib/api";
-import { fmtAmount } from "@/lib/format";
+import { fmtAmount, fmtAmountNonZero } from "@/lib/format";
 import { EXPECTED_FILL_DELAY_SECS } from "@/lib/gasPricing";
 import { DEFAULT_MAX_FEE_RATE, feeOf } from "@/lib/pricing";
 import { PayoutCurve } from "./PayoutCurve";
@@ -123,9 +123,15 @@ export function FeePreview({
       </div>
       {timeFee > 0n && (
         <div className="mt-1 flex items-center justify-between">
-          <span className="text-slate-400">Capital opportunity cost</span>
+          <span className="flex items-center gap-1 text-slate-400">
+            Capital opportunity cost
+            <InfoTip label="What is the capital opportunity cost?">
+              The relayer fronts the funds before the bridge settles, so it charges the time value of
+              that capital (≈10% APR) for the seconds you receive sooner. Tiny, but never zero.
+            </InfoTip>
+          </span>
           <span className="font-mono text-slate-200">
-            {fmtAmount(timeFee, decimals, 4)} {symbol}
+            {fmtAmountNonZero(timeFee, decimals, 4)} {symbol}
           </span>
         </div>
       )}
@@ -151,7 +157,7 @@ export function FeePreview({
         <div className="mt-1 flex items-center justify-between">
           <span className="text-slate-400">Cost of speed</span>
           <span className="font-mono text-slate-200">
-            ≈ {fmtAmount(perMinute, decimals, 4)} {symbol}
+            ≈ {fmtAmountNonZero(perMinute, decimals, 4)} {symbol}
             <span className="text-slate-500">/min saved</span>
           </span>
         </div>
@@ -174,28 +180,25 @@ export function FeePreview({
         <div className="mt-2 rounded-md border border-edge bg-panel/50 p-2 text-[11px]">
           <div className="mb-1 text-slate-400">CCTP direct comparison</div>
           <div className="flex items-center justify-between">
-            <span className="text-slate-500">Circle fast + forwarding</span>
-            <span className="font-mono text-slate-200">
-              {fmtAmount(BigInt(comparison.circleFastForwarding), decimals, 4)} {symbol}
+            <span className="text-slate-500">
+              Circle {comparison.speed}
+              {comparison.forwarding ? " + forwarding" : ""}
             </span>
-          </div>
-          <div className="mt-0.5 flex items-center justify-between">
-            <span className="text-slate-500">Circle slow + forwarding</span>
             <span className="font-mono text-slate-200">
-              {fmtAmount(BigInt(comparison.circleSlowForwarding), decimals, 4)} {symbol}
+              {fmtAmountNonZero(BigInt(comparison.circleDirect), decimals, 4)} {symbol}
             </span>
           </div>
           <div className="mt-0.5 flex items-center justify-between">
             <span className="text-slate-500">fast-fill estimate</span>
             <span className="font-mono text-slate-200">
-              {fmtAmount(BigInt(comparison.fastFillEstimated), decimals, 4)} {symbol}
+              {fmtAmountNonZero(BigInt(comparison.fastFillEstimated), decimals, 4)} {symbol}
             </span>
           </div>
           <div className="mt-1 text-slate-500">
-            vs fast forwarding:{" "}
-            <span className={BigInt(comparison.savingsVsFastForwarding) >= 0n ? "text-good" : "text-warn"}>
-              {BigInt(comparison.savingsVsFastForwarding) >= 0n ? "saves" : "costs"}{" "}
-              {fmtAmount(abs(BigInt(comparison.savingsVsFastForwarding)), decimals, 4)} {symbol}
+            vs Circle {comparison.speed}:{" "}
+            <span className={BigInt(comparison.savings) >= 0n ? "text-good" : "text-warn"}>
+              {BigInt(comparison.savings) >= 0n ? "saves" : "costs"}{" "}
+              {fmtAmountNonZero(abs(BigInt(comparison.savings)), decimals, 4)} {symbol}
             </span>
           </div>
         </div>
@@ -209,6 +212,7 @@ export function FeePreview({
         symbol={symbol}
         maxFeeRate={maxFeeRate}
         mintFee={mintFee}
+        cctpDirectReceived={comparison ? BigInt(comparison.cctpDirectReceived) : undefined}
       />
       <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
         The premium decays linearly to{" "}
@@ -222,6 +226,27 @@ export function FeePreview({
         </span>{" "}
         when the bridge settles (~{deliveryWindow.toString()}s) — at no premium.
       </p>
+      {comparison && (
+        <p className="mt-1 text-[11px] leading-relaxed text-slate-500">
+          The{" "}
+          <span className="text-warn">amber</span> marker is CCTP direct: the recipient would net{" "}
+          <span className="text-warn">
+            {fmtAmountNonZero(BigInt(comparison.cctpDirectReceived), decimals, 4)} {symbol}
+          </span>{" "}
+          only once the bridge settles (~{deliveryWindow.toString()}s). Fast-fill reaches them in
+          ~15s
+          {BigInt(comparison.savings) >= 0n ? (
+            <>
+              {" "}
+              and{" "}
+              <span className="text-good">
+                saves {fmtAmountNonZero(abs(BigInt(comparison.savings)), decimals, 4)} {symbol}
+              </span>
+            </>
+          ) : null}
+          .
+        </p>
+      )}
       <p className="mt-2 text-[11px]">
         <DocLink href="/docs/architecture#5-pricing">How pricing works</DocLink>
       </p>

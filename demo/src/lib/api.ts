@@ -112,15 +112,16 @@ export interface PricingQuoteResponse {
     secondsSaved: string;
     targetTimeFee: string;
   };
+  // Single apples-to-apples Circle reference matching the request's settlement speed + forwarding.
   comparison?: {
-    circleFastForwarding: string;
-    circleSlowForwarding: string;
-    fastFillEstimated: string;
-    fastProtocolFee: string;
-    slowForwardFee: string;
-    fastForwardFee: string;
-    savingsVsFastForwarding: string;
-    savingsVsSlowForwarding: string;
+    speed: "fast" | "slow"; // mirrors the selected CCTP finality
+    forwarding: boolean; // whether the Circle reference includes the forwarding (mint) fee
+    circleDirect: string; // total Circle cost for this exact transfer's settings
+    circleProtocolFee: string;
+    circleForwardFee: string; // 0 when forwarding is off
+    cctpDirectReceived: string; // amount − circleDirect: what the recipient nets via CCTP directly
+    fastFillEstimated: string; // fast-fill total cost (fees) for the same settings
+    savings: string; // signed circleDirect − fastFillEstimated
   };
 }
 

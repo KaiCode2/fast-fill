@@ -1,6 +1,6 @@
 import "server-only";
 import type { GaslessBridgeRequest, PricingQuoteRequest, PricingQuoteResponse } from "@/lib/api";
-import { FINALITY_FAST, outputAmountOf } from "@/lib/bridge";
+import { FINALITY_FAST, FINALITY_FINALIZED, outputAmountOf } from "@/lib/bridge";
 import { isSupportedChain, REGISTRY, type SupportedChainId } from "@/lib/chains";
 import {
   bufferedCctpMaxFee,
@@ -130,13 +130,6 @@ export async function quoteBridgePricing(req: PricingQuoteRequest): Promise<Pric
     protocolFee = cctpProtocolFee(amount, selectedRow.minimumFee);
     maxFee = bufferedCctpMaxFee(protocolFee);
 
-    const fastRow = feeRow(forwardFees, FINALITY_FAST);
-    const slowRow = feeRow(forwardFees, 2000);
-    const fastProtocolFee = cctpProtocolFee(amount, fastRow.minimumFee);
-    const fastForwardFee = forwardFeeMed(fastRow);
-    const slowForwardFee = forwardFeeMed(slowRow);
-    const slowDirect = slowForwardFee;
-
     const provisionalOutput = outputAmountOf({
       bridgeType: req.bridgeType,
       amount,
@@ -145,17 +138,24 @@ export async function quoteBridgePricing(req: PricingQuoteRequest): Promise<Pric
     });
     const opp = opportunityCostQuote({ outputAmount: provisionalOutput, deliveryWindow });
     const fastFillEstimated = protocolFee + gasFees.mintFee + gasFees.baseFee + opp.targetTimeFee;
-    const circleFastForwarding = fastProtocolFee + fastForwardFee;
+
+    // Apples-to-apples Circle-direct reference for *this* transfer's settings: the selected finality's
+    // protocol fee, plus the forwarding (mint) fee only when the user enabled Relay Mint. This is the
+    // single number a user would pay using Circle directly with the same speed/forwarding choice.
+    const forwarding = req.relayMint;
+    const circleForwardFee = forwarding ? forwardFeeMed(feeRow(forwardFees, req.finality)) : 0n;
+    const circleDirect = protocolFee + circleForwardFee;
+    const cctpDirectReceived = amount > circleDirect ? amount - circleDirect : 0n;
 
     comparison = {
-      circleFastForwarding: circleFastForwarding.toString(),
-      circleSlowForwarding: slowDirect.toString(),
+      speed: req.finality === FINALITY_FINALIZED ? "slow" : "fast",
+      forwarding,
+      circleDirect: circleDirect.toString(),
+      circleProtocolFee: protocolFee.toString(),
+      circleForwardFee: circleForwardFee.toString(),
+      cctpDirectReceived: cctpDirectReceived.toString(),
       fastFillEstimated: fastFillEstimated.toString(),
-      fastProtocolFee: fastProtocolFee.toString(),
-      slowForwardFee: slowForwardFee.toString(),
-      fastForwardFee: fastForwardFee.toString(),
-      savingsVsFastForwarding: signedSavings(circleFastForwarding, fastFillEstimated),
-      savingsVsSlowForwarding: signedSavings(slowDirect, fastFillEstimated),
+      savings: signedSavings(circleDirect, fastFillEstimated),
     };
   }
 
