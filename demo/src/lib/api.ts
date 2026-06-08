@@ -119,6 +119,8 @@ export interface PricingQuoteResponse {
     circleDirect: string; // total Circle cost for this exact transfer's settings
     circleProtocolFee: string;
     circleForwardFee: string; // 0 when forwarding is off
+    circleClaimGas: string; // gas to self-mint the USDC; 0 when forwarding is on
+    circleExecGas: string; // gas for a separate destination action tx (deposit/swap); 0 when no action
     cctpDirectReceived: string; // amount − circleDirect: what the recipient nets via CCTP directly
     fastFillEstimated: string; // fast-fill total cost (fees) for the same settings
     savings: string; // signed circleDirect − fastFillEstimated

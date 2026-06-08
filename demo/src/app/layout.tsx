@@ -4,7 +4,7 @@ import "./globals.css";
 import { Providers } from "./providers";
 
 export const metadata: Metadata = {
-  title: "fast-fill — optimistic cross-chain transfers",
+  title: "Fast Fill",
   description:
     "Demo: bridge USDC (CCTP) and USD₮0 (LayerZero OFT) across Arbitrum, Optimism and Base with instant optimistic fills, gasless intents, and live settlement.",
 };

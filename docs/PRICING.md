@@ -75,6 +75,8 @@ Response:
     "circleDirect": "...",
     "circleProtocolFee": "...",
     "circleForwardFee": "...",
+    "circleClaimGas": "...",
+    "circleExecGas": "...",
     "cctpDirectReceived": "...",
     "fastFillEstimated": "...",
     "savings": "..."
@@ -244,21 +246,32 @@ The UI shows a CCTP-only comparison so users can compare fast-fill with using Ci
 keep it an apples-to-apples comparison, only the single Circle option that matches the user's chosen
 settlement speed and forwarding (Relay Mint) toggle is shown.
 
+The reference reflects the *full* cost and number of steps of going direct, so it stays honest when
+fast-fill bundles work (claim + destination action) that the user would otherwise pay for separately:
+
 | Field | Formula |
 |---|---|
 | `speed` | `"slow"` for finalized (`finality === 2000`), otherwise `"fast"` |
-| `forwarding` | Mirrors `relayMint` — whether the Circle reference includes the forwarding fee |
+| `forwarding` | Mirrors `relayMint` — whether the Circle reference uses forwarding or self-claim |
 | `circleProtocolFee` | Unbuffered Circle protocol fee for the selected finality |
-| `circleForwardFee` | Selected finality's `forwardFee.med`, or `0` when forwarding is off |
-| `circleDirect` | `circleProtocolFee + circleForwardFee` — the apples-to-apples Circle cost |
-| `cctpDirectReceived` | `amount − circleDirect` — what the recipient nets via CCTP directly |
-| `fastFillEstimated` | Expected Circle protocol fee + Relay Mint fee + base fill gas + opportunity cost |
+| `circleForwardFee` | Selected finality's `forwardFee.med` (forwarding on), else `0` |
+| `circleClaimGas` | Buffered destination gas to self-mint the USDC (`CCTP_DIRECT_SETTLE_GAS`), `0` when forwarding is on |
+| `circleExecGas` | Buffered gas for a *separate* destination-action tx (`callbackGasLimit + STANDALONE_TX_BASE_GAS`), `0` when no action |
+| `circleDirect` | `circleProtocolFee + circleForwardFee + circleClaimGas + circleExecGas` — the all-in direct cost |
+| `cctpDirectReceived` | `amount − circleDirect` — what the recipient effectively nets via CCTP directly |
+| `fastFillEstimated` | Expected Circle protocol fee + Relay Mint fee + base fill gas (incl. the action) + opportunity cost |
 | `savings` | Signed `circleDirect − fastFillEstimated` |
 
-The panel renders one Circle line (`Circle fast`/`Circle slow`, with `+ forwarding` appended only
-when enabled), the fast-fill estimate, and the signed saving. `cctpDirectReceived` is also overlaid
-on the payout curve as an amber benchmark anchored at the settlement time, so users can see they
-receive funds earlier than CCTP direct (and by how much).
+`circleExecGas` matters because fast-fill runs any destination action (Aave deposit / Uniswap swap)
+atomically inside the fill — its gas is already in `baseFee` (via `fillGasUnits`). Going direct, the
+recipient must run that action as its own post-settlement transaction, paying its gas plus a fresh
+tx's intrinsic overhead; counting it keeps the comparison apples-to-apples.
+
+The panel renders one Circle line (`Circle fast`/`Circle slow`, labelled with its steps — forwarding
+or self-claim, plus the action when set), the fast-fill estimate, a **Cost** line (signed saving and
+the percent cheaper/pricier vs Circle), and a **Speed** line (~1.5s typical fill vs the settlement
+window, with the fold-in that going direct also needs a separate action tx). `cctpDirectReceived` is
+also overlaid on the payout curve as an amber benchmark anchored at the settlement time.
 
 The comparison is hidden for OFTs because LayerZero fees are always charged by the bridge; fast-fill
 only changes the speed/relayer premium.

@@ -22,6 +22,16 @@ function abs(v: bigint): bigint {
   return v < 0n ? -v : v;
 }
 
+/** Compact seconds → "45s" / "19m" for the speed comparison. */
+function fmtSecs(s: number): string {
+  if (s < 90) return `${Math.round(s)}s`;
+  const m = s / 60;
+  return `${m % 1 === 0 ? m : m.toFixed(m < 10 ? 1 : 0)}m`;
+}
+
+/** Typical optimistic fill latency used purely for the "× faster than CCTP" framing. */
+const FAST_FILL_SECS = 1.5;
+
 /**
  * Shows what the recipient receives at the expected fast-fill delay and notes that the premium
  * decays to just the flat baseFee over the delivery window. Uses the local PricingLib mirror; the
@@ -44,6 +54,7 @@ export function FeePreview({
   lzFeeLoading = false,
   pricingBreakdown,
   comparison,
+  actionLabel,
 }: {
   outputAmount: bigint;
   deliveryWindow: bigint;
@@ -57,6 +68,8 @@ export function FeePreview({
   lzFeeLoading?: boolean;
   pricingBreakdown?: PricingQuoteResponse["breakdown"];
   comparison?: PricingQuoteResponse["comparison"];
+  /** Short name of the destination action (e.g. "Aave deposit"), shown in the CCTP comparison. */
+  actionLabel?: string;
 }) {
   if (outputAmount <= 0n) return null;
 
@@ -176,33 +189,72 @@ export function FeePreview({
           </div>
         </div>
       )}
-      {comparison && (
-        <div className="mt-2 rounded-md border border-edge bg-panel/50 p-2 text-[11px]">
-          <div className="mb-1 text-slate-400">CCTP direct comparison</div>
-          <div className="flex items-center justify-between">
-            <span className="text-slate-500">
-              Circle {comparison.speed}
-              {comparison.forwarding ? " + forwarding" : ""}
-            </span>
-            <span className="font-mono text-slate-200">
-              {fmtAmountNonZero(BigInt(comparison.circleDirect), decimals, 4)} {symbol}
-            </span>
+      {comparison && (() => {
+        const savings = BigInt(comparison.savings);
+        const circleDirect = BigInt(comparison.circleDirect);
+        const cheaper = savings >= 0n;
+        // Percentage saved (or overpaid) relative to going via Circle directly.
+        const pct = circleDirect > 0n ? Number((abs(savings) * 10_000n) / circleDirect) / 100 : null;
+        const cctpSecs = Number(deliveryWindow);
+        const speedup = cctpSecs > FAST_FILL_SECS ? Math.round(cctpSecs / FAST_FILL_SECS) : 0;
+        // Destination action (Aave deposit / Uniswap swap): fast-fill runs it atomically in the fill,
+        // so going direct adds a separate post-settlement transaction to the cost + steps.
+        const hasAction = BigInt(comparison.circleExecGas) > 0n;
+        const action = actionLabel ?? "execution";
+        const steps = [comparison.forwarding ? "forwarding" : "self-claim"];
+        if (hasAction) steps.push(action);
+        return (
+          <div className="mt-2 rounded-md border border-edge bg-panel/50 p-2 text-[11px]">
+            <div className="mb-1 flex items-center gap-1 text-slate-400">
+              CCTP direct comparison
+              <InfoTip label="How does this compare to CCTP direct?">
+                What this transfer would cost and how long it would take using Circle CCTP directly,
+                with the same settings.{" "}
+                {comparison.forwarding
+                  ? "Includes Circle's forwarding fee for auto-delivery."
+                  : "Includes the destination gas you'd pay to mint (claim) the USDC yourself."}
+                {hasAction
+                  ? ` fast-fill runs the ${action} atomically in the fill; via Circle you'd pay for a separate ${action} transaction afterwards.`
+                  : ""}
+              </InfoTip>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-slate-500">
+                Circle {comparison.speed} ({steps.join(" + ")})
+              </span>
+              <span className="font-mono text-slate-200">
+                {fmtAmountNonZero(circleDirect, decimals, 4)} {symbol}
+              </span>
+            </div>
+            <div className="mt-0.5 flex items-center justify-between">
+              <span className="text-slate-500">fast-fill estimate{hasAction ? " (one-shot)" : ""}</span>
+              <span className="font-mono text-slate-200">
+                {fmtAmountNonZero(BigInt(comparison.fastFillEstimated), decimals, 4)} {symbol}
+              </span>
+            </div>
+            <div className="mt-1 flex items-center justify-between">
+              <span className="text-slate-500">Cost</span>
+              <span className={cheaper ? "text-good" : "text-warn"}>
+                {cheaper ? "saves" : "costs"} {fmtAmountNonZero(abs(savings), decimals, 4)} {symbol}
+                {pct !== null && (
+                  <span className="text-slate-500">
+                    {" "}({pct.toLocaleString(undefined, { maximumFractionDigits: 1 })}%{" "}
+                    {cheaper ? "cheaper" : "more"})
+                  </span>
+                )}
+              </span>
+            </div>
+            <div className="mt-0.5 flex items-center justify-between">
+              <span className="text-slate-500">Speed</span>
+              <span className="text-slate-200">
+                ~{FAST_FILL_SECS}s{hasAction ? " one-shot" : ""} vs ~{fmtSecs(cctpSecs)}
+                {hasAction ? " + a separate tx" : ""}
+                {speedup > 1 && <span className="text-good"> (≈{speedup.toLocaleString()}× faster)</span>}
+              </span>
+            </div>
           </div>
-          <div className="mt-0.5 flex items-center justify-between">
-            <span className="text-slate-500">fast-fill estimate</span>
-            <span className="font-mono text-slate-200">
-              {fmtAmountNonZero(BigInt(comparison.fastFillEstimated), decimals, 4)} {symbol}
-            </span>
-          </div>
-          <div className="mt-1 text-slate-500">
-            vs Circle {comparison.speed}:{" "}
-            <span className={BigInt(comparison.savings) >= 0n ? "text-good" : "text-warn"}>
-              {BigInt(comparison.savings) >= 0n ? "saves" : "costs"}{" "}
-              {fmtAmountNonZero(abs(BigInt(comparison.savings)), decimals, 4)} {symbol}
-            </span>
-          </div>
-        </div>
-      )}
+        );
+      })()}
       <PayoutCurve
         outputAmount={outputAmount}
         deliveryWindow={deliveryWindow}
@@ -233,18 +285,8 @@ export function FeePreview({
           <span className="text-warn">
             {fmtAmountNonZero(BigInt(comparison.cctpDirectReceived), decimals, 4)} {symbol}
           </span>{" "}
-          only once the bridge settles (~{deliveryWindow.toString()}s). Fast-fill reaches them in
-          ~15s
-          {BigInt(comparison.savings) >= 0n ? (
-            <>
-              {" "}
-              and{" "}
-              <span className="text-good">
-                saves {fmtAmountNonZero(abs(BigInt(comparison.savings)), decimals, 4)} {symbol}
-              </span>
-            </>
-          ) : null}
-          .
+          only once the bridge settles (~{fmtSecs(Number(deliveryWindow))}) — see the cost and speed
+          comparison above.
         </p>
       )}
       <p className="mt-2 text-[11px]">
