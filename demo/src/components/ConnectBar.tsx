@@ -24,12 +24,9 @@ export function ConnectBar() {
   return (
     <header className="sticky top-0 z-20 border-b border-edge bg-ink/70 backdrop-blur">
       <div className="mx-auto flex max-w-5xl items-center justify-between gap-4 px-4 py-3">
-        <Link href="/" className="flex items-center gap-2">
-          <span className="grid h-8 w-8 place-items-center rounded-lg bg-accent font-bold text-ink">f</span>
-          <div className="leading-tight">
-            <div className="text-sm font-semibold text-slate-100">fast-fill</div>
-            <div className="text-[11px] text-slate-500">optimistic cross-chain transfers</div>
-          </div>
+        <Link href="/" className="flex items-center" aria-label="Fast Fill — home">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src="/fastfill-logo.png" alt="Fast Fill" className="h-8 w-auto" />
         </Link>
         <div className="flex items-center gap-4 sm:gap-6">
           <nav>

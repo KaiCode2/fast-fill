@@ -4,6 +4,8 @@ import { DEFAULT_MAX_FEE_RATE, WAD } from "./pricing";
 export const FAST_FILL_GAS = 59_495n;
 export const CCTP_DIRECT_SETTLE_GAS = 83_897n;
 export const CCTP_EXECUTOR_SETTLE_BUDGET_GAS = 350_000n;
+/** Intrinsic gas of a standalone tx — the per-tx overhead a separate claim/execute pays that a bundled fast-fill avoids. */
+export const STANDALONE_TX_BASE_GAS = 21_000n;
 
 export const GAS_BUFFER_BPS = 2_500n;
 export const CCTP_MAX_FEE_BUFFER_BPS = 2_000n;

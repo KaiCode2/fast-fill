@@ -1,5 +1,6 @@
 "use client";
 
+import { useQueryClient } from "@tanstack/react-query";
 import type { OrderStatus } from "@/lib/api";
 import { explorerTx, REGISTRY } from "@/lib/chains";
 import { fmtAmount, shortHash } from "@/lib/format";
@@ -7,6 +8,7 @@ import { BRIDGE_CCTP } from "@/lib/order";
 import { useOrderStatus } from "@/hooks/useOrderStatus";
 import type { TransferRecord } from "@/hooks/useTransfers";
 import { DocLink } from "./docs/DocLink";
+import { SelfRelayButton } from "./SelfRelayButton";
 
 type StepState = "done" | "active" | "pending" | "skipped";
 
@@ -17,6 +19,7 @@ function dot(s: StepState) {
 }
 
 export function OrderTimeline({ t }: { t: TransferRecord }) {
+  const queryClient = useQueryClient();
   const { data, error } = useOrderStatus(t.orderId);
   const decimals = REGISTRY[t.srcChainId].usdc.decimals; // both tokens are 6dp
   const s: OrderStatus | undefined = data;
@@ -98,6 +101,13 @@ export function OrderTimeline({ t }: { t: TransferRecord }) {
           {s?.lzStatus && !settled && <div className="text-[11px] text-slate-500">LayerZero: {s.lzStatus}</div>}
         </div>
       </div>
+
+      {!filled && !settled && (
+        <SelfRelayButton
+          t={t}
+          onFilled={() => queryClient.invalidateQueries({ queryKey: ["orderStatus", t.orderId] })}
+        />
+      )}
 
       {error && <p className="text-[11px] text-slate-500">Relayer status unavailable (backend offline or not configured).</p>}
       {s?.error && <p className="text-[11px] text-warn">{s.error}</p>}

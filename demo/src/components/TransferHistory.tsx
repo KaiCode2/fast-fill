@@ -6,13 +6,16 @@ import type { TransferRecord } from "@/hooks/useTransfers";
 import { OrderTimeline } from "./OrderTimeline";
 
 export function TransferHistory({ transfers }: { transfers: TransferRecord[] }) {
-  if (transfers.length === 0) return null;
-
   return (
     <div className="card">
       <h2 className="mb-3 text-sm font-semibold text-slate-100">Transfers</h2>
-      <div className="space-y-4">
-        {transfers.map((t) => (
+      {transfers.length === 0 ? (
+        <p className="text-sm text-slate-500">
+          No transfers yet — the ones you start will appear here and persist in this browser.
+        </p>
+      ) : (
+        <div className="space-y-4">
+          {transfers.map((t) => (
           <div key={t.orderId} className="rounded-lg border border-edge bg-ink/60 p-4">
             <div className="mb-3 flex items-center justify-between">
               <div className="text-sm text-slate-200">
@@ -30,8 +33,9 @@ export function TransferHistory({ transfers }: { transfers: TransferRecord[] }) 
             </div>
             <OrderTimeline t={t} />
           </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

@@ -5,6 +5,7 @@ import {
   Area,
   AreaChart,
   CartesianGrid,
+  ReferenceDot,
   ReferenceLine,
   ResponsiveContainer,
   Tooltip,
@@ -54,6 +55,11 @@ function PayoutTooltip({
  * payout *rises* over time toward the full amount. A dashed reference line marks the full amount
  * the recipient is guaranteed when the bridge itself settles (no premium) if nobody fast-fills.
  * Mirrors the on-chain `PricingLib`; `quoteFill` is authoritative at fill time.
+ *
+ * `cctpDirectReceived` (CCTP only) overlays what the recipient would net using Circle directly — a
+ * single amber benchmark anchored at the settlement time (the right edge), since CCTP direct only
+ * delivers once the bridge settles. The fast-fill curve sitting left-of and (usually) above it
+ * shows the recipient gets funds earlier, and the vertical gap is the saving at any fill time.
  */
 export function PayoutCurve({
   outputAmount,
@@ -64,6 +70,7 @@ export function PayoutCurve({
   symbol,
   maxFeeRate = DEFAULT_MAX_FEE_RATE,
   mintFee = 0n,
+  cctpDirectReceived,
 }: {
   outputAmount: bigint;
   deliveryWindow: bigint;
@@ -73,6 +80,7 @@ export function PayoutCurve({
   symbol: string;
   maxFeeRate?: bigint;
   mintFee?: bigint;
+  cctpDirectReceived?: bigint;
 }) {
   const windowSecs = Number(deliveryWindow);
   if (outputAmount <= 0n || windowSecs <= 0) return null;
@@ -94,12 +102,17 @@ export function PayoutCurve({
   });
 
   const full = toNum(outputAmount);
-  const lo = data[0].amount; // instant-fill payout (the lowest point)
+  const curveLo = data[0].amount; // instant-fill payout (the lowest point on the curve)
   // The flat CCTP executor fee is already netted out of `outputAmount`; `gross` is what would arrive
   // without it, so the gap between the two reference lines visualises the executor fee on the curve.
   const mintFeeNum = mintFee > 0n ? toNum(mintFee) : 0;
   const gross = full + mintFeeNum;
-  const top = mintFeeNum > 0 ? gross : full;
+  const curveTop = mintFeeNum > 0 ? gross : full;
+  // The CCTP-direct benchmark can fall outside the curve's range (its fees differ from fast-fill's),
+  // so fold it into the y-domain to keep the marker on-chart.
+  const cctpNum = cctpDirectReceived !== undefined ? toNum(cctpDirectReceived) : undefined;
+  const lo = cctpNum !== undefined ? Math.min(curveLo, cctpNum) : curveLo;
+  const top = cctpNum !== undefined ? Math.max(curveTop, cctpNum) : curveTop;
   const pad = top > lo ? (top - lo) * 0.2 : Math.max(top * 0.001, 1e-6);
   const yDomain: [number, number] = [Math.max(0, lo - pad), top + pad];
 
@@ -161,6 +174,20 @@ export function PayoutCurve({
                 fontSize: 10,
               }}
             />
+            {cctpNum !== undefined && (
+              <ReferenceLine
+                y={cctpNum}
+                stroke="#ffb454"
+                strokeDasharray="5 3"
+                strokeOpacity={0.75}
+                label={{
+                  value: `CCTP direct ${fmtAmt(cctpNum)}`,
+                  position: "insideTopLeft",
+                  fill: "#ffb454",
+                  fontSize: 10,
+                }}
+              />
+            )}
             <Area
               type="monotone"
               dataKey="amount"
@@ -170,6 +197,18 @@ export function PayoutCurve({
               dot={false}
               isAnimationActive={false}
             />
+            {cctpNum !== undefined && (
+              // Anchored at the right edge: CCTP direct only pays out once the bridge settles.
+              <ReferenceDot
+                x={windowSecs}
+                y={cctpNum}
+                r={4}
+                fill="#ffb454"
+                stroke="#0b0e14"
+                strokeWidth={1.5}
+                ifOverflow="visible"
+              />
+            )}
           </AreaChart>
         </ResponsiveContainer>
       </div>

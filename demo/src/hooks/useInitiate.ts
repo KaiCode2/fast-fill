@@ -7,14 +7,15 @@ import { cctpAdapterAbi, oftAdapterAbi } from "@/lib/abis/generated";
 import { erc20Abi } from "@/lib/abis/erc20";
 import { erc20PermitAbi } from "@/lib/abis/erc20Permit";
 import { api, submitSelfWithRetry, type SubmitMode } from "@/lib/api";
-import { cctpInitiateArgs, oftInitiateArgs, outputAmountOf, type BridgeParams } from "@/lib/bridge";
+import { buildOrder, cctpInitiateArgs, oftInitiateArgs, outputAmountOf, type BridgeParams } from "@/lib/bridge";
 import { quoteOftNativeFee } from "@/lib/oftQuote";
 import { PERMIT2, REGISTRY, type SupportedChainId } from "@/lib/chains";
 import { adapterAddress } from "@/lib/config";
 import { buildExtraOptions, DEFAULT_COMPOSE_GAS, DEFAULT_LZRECEIVE_GAS } from "@/lib/lzOptions";
-import { addressToBytes32, BRIDGE_CCTP, type Order } from "@/lib/order";
+import { addressToBytes32, BRIDGE_CCTP, orderIdOf, type Order } from "@/lib/order";
 import { buildOrderIntentTypedData, cctpBridgeParams, oftBridgeParams, randomPermit2Nonce } from "@/lib/permit2";
 import { buildPermit2612TypedData, splitSignature } from "@/lib/permit2612";
+import { readTokenDomain } from "@/lib/tokenPermit";
 import { getToken } from "@/lib/tokens";
 import { publicClientFor } from "@/lib/viemClients";
 
@@ -68,27 +69,24 @@ export function useInitiate() {
     return (nativeFee * 12n) / 10n;
   }
 
-  async function readTokenDomain(token: Address, chainId: SupportedChainId): Promise<{ name: string; version: string }> {
-    const client = publicClientFor(chainId);
+  // Rebuild the exact on-chain Order from the just-mined initiate so self-relay has it locally (the
+  // OrderCreated event only carries a summary). `startTime` is the source block timestamp; we read it
+  // by block HASH (canonical, no load-balanced "block not found" race) and prove the rebuild by
+  // matching the contract's emitted orderId. Best-effort: any failure just leaves the order uncaptured
+  // (self-relay is then unavailable for that transfer) and never blocks the transfer itself.
+  async function reconstructOrder(
+    p: BridgeParams,
+    sender: Address,
+    blockHash: Hex,
+    ev: { orderId: Hex; nonce: bigint },
+  ): Promise<Order | undefined> {
     try {
-      // EIP-5267 returns (fields, name, version, chainId, verifyingContract, salt, extensions).
-      const d = (await client.readContract({
-        address: token,
-        abi: erc20PermitAbi,
-        functionName: "eip712Domain",
-      })) as readonly [Hex, string, string, bigint, Address, Hex, readonly bigint[]];
-      return { name: d[1], version: d[2] };
+      const block = await publicClientFor(p.srcChainId).getBlock({ blockHash });
+      const order = buildOrder(p, sender, { nonce: ev.nonce, startTime: block.timestamp });
+      return orderIdOf(order).toLowerCase() === ev.orderId.toLowerCase() ? order : undefined;
     } catch {
-      /* token doesn't implement EIP-5267 */
+      return undefined;
     }
-    const name = (await client.readContract({ address: token, abi: erc20Abi, functionName: "name" })) as string;
-    let version = "1";
-    try {
-      version = (await client.readContract({ address: token, abi: erc20PermitAbi, functionName: "version" })) as string;
-    } catch {
-      /* default to "1" */
-    }
-    return { name, version };
   }
 
   /** Shared tail for self-submitted txs: confirm, parse OrderCreated, reconstruct, hand off. */
@@ -107,6 +105,10 @@ export function useInitiate() {
     // The backend independently re-derives and verifies the full order from the tx, so we simply
     // hand off the tx hash.
     const orderId = (created.args as { orderId: Hex }).orderId;
+    const order = await reconstructOrder(p, address as Address, receipt.blockHash, {
+      orderId,
+      nonce: (created.args as { nonce: bigint }).nonce,
+    });
 
     setState({ phase: "handoff", message: "Notifying the relayer" });
     const handoff = await submitSelfWithRetry(
@@ -121,7 +123,7 @@ export function useInitiate() {
       console.warn(`fallback relayer handoff failed after ${handoff.attempts} attempts: ${handoff.error}`);
     }
     setState({ phase: "done", message: "Submitted" });
-    return { orderId, srcTxHash: txHash };
+    return { orderId, srcTxHash: txHash, order };
   }
 
   async function ensureAllowance(token: Address, owner: Address, spender: Address, amount: bigint, chainId: SupportedChainId) {
@@ -280,8 +282,27 @@ export function useInitiate() {
       permit: { nonce: nonce.toString(), deadline: deadline.toString(), signature },
     });
 
+    // Capture the full order for self-relay (best-effort), mirroring the self-submitted paths. The
+    // relayer already submitted the burn, so we read its receipt to recover the nonce + block time.
+    let order: Order | undefined;
+    try {
+      const srcClient = publicClientFor(p.srcChainId);
+      const receipt = await srcClient.waitForTransactionReceipt({ hash: res.srcTxHash });
+      const abi2 = p.bridgeType === BRIDGE_CCTP ? cctpAdapterAbi : oftAdapterAbi;
+      const events = parseEventLogs({ abi: abi2, eventName: "OrderCreated", logs: receipt.logs });
+      const created = events.find((e) => (e.address as string).toLowerCase() === adapter.toLowerCase());
+      if (created) {
+        order = await reconstructOrder(p, from, receipt.blockHash, {
+          orderId: res.orderId,
+          nonce: (created.args as { nonce: bigint }).nonce,
+        });
+      }
+    } catch {
+      /* leave order undefined — self-relay just won't be offered for this transfer */
+    }
+
     setState({ phase: "done", message: "Submitted" });
-    return { orderId: res.orderId, srcTxHash: res.srcTxHash };
+    return { orderId: res.orderId, srcTxHash: res.srcTxHash, order };
   }
 
   async function submit(p: BridgeParams, mode: SubmitMode, forwarding: boolean): Promise<InitiateResult> {

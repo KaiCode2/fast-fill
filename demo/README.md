@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="../assets/fastfill-logo.png" alt="Fast Fill" width="420">
+</p>
+
 # fast-fill demo
 
 A small Next.js app that showcases the [fast-fill](../README.md) optimistic-fill protocol on **real

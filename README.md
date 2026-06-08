@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/fastfill-logo.png" alt="Fast Fill" width="420">
+</p>
+
 # fast-fill
 
 A thin **optimistic fill** layer on top of message-based bridges (Circle **CCTP v2** and LayerZero **OFT**). It lets external relayers pre-pay a cross-chain transfer on the destination chain *before* the underlying bridge message is verified, for a small user-priced premium. When the bridge message finally settles, the bridged funds reimburse the relayer (if the order was filled) or flow straight to the recipient (if it was not).

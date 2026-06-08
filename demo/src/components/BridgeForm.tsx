@@ -15,7 +15,7 @@ import { REGISTRY, SUPPORTED_CHAIN_IDS, tokenInfo, type SupportedChainId, type T
 import { contractsConfigured, maxUsdPerTransfer } from "@/lib/config";
 import { fmtAmount } from "@/lib/format";
 import { bridgeTypeForToken, chainsForToken, destinationsFor, getToken, isRouteSupported } from "@/lib/tokens";
-import { BRIDGE_CCTP } from "@/lib/order";
+import { BRIDGE_CCTP, serializeOrder } from "@/lib/order";
 import {
   encodeAaveHookData,
   encodeUniswapHookData,
@@ -26,6 +26,7 @@ import {
 } from "@/lib/hooks";
 import { resolveToken, resolveTokenAsync, type TokenMeta } from "@/lib/tokenRegistry";
 import { DEFAULT_SLIPPAGE_BPS } from "@/lib/uniswap";
+import { decodeFormState, encodeFormState } from "@/lib/urlState";
 import { useBalances } from "@/hooks/useBalances";
 import { useInitiate } from "@/hooks/useInitiate";
 import { useOftFee } from "@/hooks/useOftFee";
@@ -55,7 +56,7 @@ function tryParseUnits(s: string, decimals: number): bigint | null {
 }
 
 export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => void }) {
-  const { address, isConnected } = useAccount();
+  const { address } = useAccount();
   const { balances } = useBalances();
   const { submit, state } = useInitiate();
 
@@ -136,6 +137,54 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
       clearTimeout(handle);
     };
   }, [tokenOutQuery, dst, hookKind]);
+
+  // ── Deep-linkable form state (URL hash) ─────────────────────────────────────
+  // Mirror the main config into the hash so a configured transfer is shareable, and restore it on
+  // load. Writes are gated until after the initial restore so we never clobber an incoming link.
+  const [hydrated, setHydrated] = useState(false);
+
+  useEffect(() => {
+    const parsed = decodeFormState(window.location.hash);
+    // Reconcile the route against what the (possibly hash-chosen) token actually supports.
+    const t = parsed.token ?? token;
+    const chains = chainsForToken(t);
+    const s = parsed.src !== undefined && chains.includes(parsed.src) ? parsed.src : chains.includes(src) ? src : chains[0];
+    const dests = destinationsFor(t, s);
+    const d = parsed.dst !== undefined && dests.includes(parsed.dst) ? parsed.dst : dests.includes(dst) ? dst : dests[0];
+
+    setToken(t);
+    setSrc(s);
+    setDst(d);
+    if (parsed.amount !== undefined) setAmountStr(parsed.amount);
+    if (parsed.finality !== undefined) setFinality(parsed.finality);
+    if (parsed.relayMint !== undefined) setRelayMint(parsed.relayMint);
+    if (parsed.action !== undefined) setHookKind(parsed.action);
+    if (parsed.tokenOut !== undefined) setTokenOutQuery(parsed.tokenOut);
+    if (parsed.slippageBps !== undefined) setSlippageBps(parsed.slippageBps);
+
+    setHydrated(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    const body = encodeFormState({
+      token,
+      src,
+      dst,
+      amount: amountStr,
+      finality,
+      relayMint,
+      action: hookKind,
+      tokenOut: tokenOutQuery,
+      slippageBps,
+    });
+    const next = `${window.location.pathname}${window.location.search}#${body}`;
+    if (`${window.location.pathname}${window.location.search}${window.location.hash}` !== next) {
+      // replaceState keeps the back button + scroll position intact while the URL stays in sync.
+      window.history.replaceState(window.history.state, "", next);
+    }
+  }, [hydrated, token, src, dst, amountStr, finality, relayMint, hookKind, tokenOutQuery, slippageBps]);
 
   const srcChains = chainsForToken(token);
   const dstChains = destinationsFor(token, src);
@@ -246,7 +295,10 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
 
   // Validation.
   const errors: string[] = [];
-  if (!isConnected) errors.push("Connect a wallet");
+  // Gate on the account address, not `isConnected`: after a reload wagmi restores the session and the
+  // address is present while `status` briefly lingers at "reconnecting" (isConnected === false). Using
+  // the address avoids a spurious "Connect a wallet" + disabled button for an already-connected user.
+  if (!address) errors.push("Connect a wallet");
   if (!contractsConfigured) errors.push("Contracts not configured (set env)");
   if (!amount || amount <= 0n) errors.push("Enter an amount");
   else if (amountUsd > maxUsdPerTransfer) errors.push(`Demo cap is ${maxUsdPerTransfer} (real money)`);
@@ -296,6 +348,7 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
         forwarding,
         hookKind,
         swapTokenSymbol: hookKind === "uniswap" ? tokenOut?.symbol : undefined,
+        order: res.order ? serializeOrder(res.order) : undefined,
         createdAt: Date.now(),
       });
     } catch {
@@ -469,7 +522,14 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
       {bridgeType === BRIDGE_CCTP && (
         <div className="grid grid-cols-2 gap-3">
           <div>
-            <label className="label">Bridge speed</label>
+            <label className="label flex items-center gap-1">
+              <span>Settlement speed</span>
+              <InfoTip label="What is settlement speed?">
+                How fast the underlying CCTP bridge settles on {REGISTRY[dst].shortName} as a
+                fallback. You&apos;re optimistically fast-filled in ~15s either way — this only sets
+                when the bridged funds would arrive on their own if no relayer fills.
+              </InfoTip>
+            </label>
             <div className="flex gap-2 rounded-lg border border-edge bg-ink p-1">
               <button onClick={() => setFinality(FINALITY_FAST)} className={`seg ${finality === FINALITY_FAST ? "seg-on" : "seg-off"}`}>
                 Fast
@@ -518,6 +578,7 @@ export function BridgeForm({ onStarted }: { onStarted: (t: TransferRecord) => vo
         lzFeeLoading={lzFeeLoading}
         pricingBreakdown={pricingQuote?.breakdown}
         comparison={pricingQuote?.comparison}
+        actionLabel={hookKind === "aave" ? "Aave deposit" : hookKind === "uniswap" ? "Uniswap swap" : undefined}
       />
 
       {/* Advanced */}

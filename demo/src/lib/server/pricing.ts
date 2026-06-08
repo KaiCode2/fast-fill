@@ -1,13 +1,16 @@
 import "server-only";
 import type { GaslessBridgeRequest, PricingQuoteRequest, PricingQuoteResponse } from "@/lib/api";
-import { FINALITY_FAST, outputAmountOf } from "@/lib/bridge";
+import { FINALITY_FAST, FINALITY_FINALIZED, outputAmountOf } from "@/lib/bridge";
 import { isSupportedChain, REGISTRY, type SupportedChainId } from "@/lib/chains";
 import {
   bufferedCctpMaxFee,
+  bufferedGasCostToken,
+  CCTP_DIRECT_SETTLE_GAS,
   cctpProtocolFee,
   gasBackedFees,
   opportunityCostQuote,
   OPPORTUNITY_APR_BPS,
+  STANDALONE_TX_BASE_GAS,
 } from "@/lib/gasPricing";
 import { BRIDGE_CCTP } from "@/lib/order";
 import { bridgeTypeForToken, getToken, isRouteSupported } from "@/lib/tokens";
@@ -130,13 +133,6 @@ export async function quoteBridgePricing(req: PricingQuoteRequest): Promise<Pric
     protocolFee = cctpProtocolFee(amount, selectedRow.minimumFee);
     maxFee = bufferedCctpMaxFee(protocolFee);
 
-    const fastRow = feeRow(forwardFees, FINALITY_FAST);
-    const slowRow = feeRow(forwardFees, 2000);
-    const fastProtocolFee = cctpProtocolFee(amount, fastRow.minimumFee);
-    const fastForwardFee = forwardFeeMed(fastRow);
-    const slowForwardFee = forwardFeeMed(slowRow);
-    const slowDirect = slowForwardFee;
-
     const provisionalOutput = outputAmountOf({
       bridgeType: req.bridgeType,
       amount,
@@ -145,17 +141,42 @@ export async function quoteBridgePricing(req: PricingQuoteRequest): Promise<Pric
     });
     const opp = opportunityCostQuote({ outputAmount: provisionalOutput, deliveryWindow });
     const fastFillEstimated = protocolFee + gasFees.mintFee + gasFees.baseFee + opp.targetTimeFee;
-    const circleFastForwarding = fastProtocolFee + fastForwardFee;
+
+    // Apples-to-apples Circle-direct reference for *this* transfer's settings: the selected finality's
+    // protocol fee, plus EITHER the forwarding (mint) fee when Relay Mint is on, OR — when it's off —
+    // the destination gas the recipient must spend to mint the USDC themselves. Counting that gas keeps
+    // the comparison honest: going direct without forwarding isn't free, you pay to claim.
+    const forwarding = req.relayMint;
+    const circleForwardFee = forwarding ? forwardFeeMed(feeRow(forwardFees, req.finality)) : 0n;
+    const circleClaimGas = forwarding
+      ? 0n
+      : bufferedGasCostToken({ gasUnits: CCTP_DIRECT_SETTLE_GAS, gasPriceWei, ethUsd: ethUsdNow, decimals });
+    // fast-fill runs any destination action (deposit/swap) atomically inside the fill — its gas is
+    // already in `baseFee` (via fillGasUnits). Going direct, the recipient must run that action as a
+    // SEPARATE transaction after the funds land, paying its gas plus a fresh tx's intrinsic overhead.
+    const circleExecGas =
+      callbackGasLimit > 0n
+        ? bufferedGasCostToken({
+            gasUnits: callbackGasLimit + STANDALONE_TX_BASE_GAS,
+            gasPriceWei,
+            ethUsd: ethUsdNow,
+            decimals,
+          })
+        : 0n;
+    const circleDirect = protocolFee + circleForwardFee + circleClaimGas + circleExecGas;
+    const cctpDirectReceived = amount > circleDirect ? amount - circleDirect : 0n;
 
     comparison = {
-      circleFastForwarding: circleFastForwarding.toString(),
-      circleSlowForwarding: slowDirect.toString(),
+      speed: req.finality === FINALITY_FINALIZED ? "slow" : "fast",
+      forwarding,
+      circleDirect: circleDirect.toString(),
+      circleProtocolFee: protocolFee.toString(),
+      circleForwardFee: circleForwardFee.toString(),
+      circleClaimGas: circleClaimGas.toString(),
+      circleExecGas: circleExecGas.toString(),
+      cctpDirectReceived: cctpDirectReceived.toString(),
       fastFillEstimated: fastFillEstimated.toString(),
-      fastProtocolFee: fastProtocolFee.toString(),
-      slowForwardFee: slowForwardFee.toString(),
-      fastForwardFee: fastForwardFee.toString(),
-      savingsVsFastForwarding: signedSavings(circleFastForwarding, fastFillEstimated),
-      savingsVsSlowForwarding: signedSavings(slowDirect, fastFillEstimated),
+      savings: signedSavings(circleDirect, fastFillEstimated),
     };
   }
 

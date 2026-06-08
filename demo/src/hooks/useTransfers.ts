@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import type { Hex } from "viem";
-import type { SubmitMode } from "@/lib/api";
+import type { SerializedOrder, SubmitMode } from "@/lib/api";
 import type { SupportedChainId, TokenSymbol } from "@/lib/chains";
 import type { HookKind } from "@/lib/hooks";
 
@@ -21,6 +21,7 @@ export interface TransferRecord {
   forwarding: boolean;
   hookKind?: HookKind; // destination action attached to this transfer
   swapTokenSymbol?: string; // for "uniswap": the token swapped into
+  order?: SerializedOrder; // full on-chain Order (when captured) — enables client-side self-relay
   createdAt: number;
 }
 
